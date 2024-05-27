@@ -280,8 +280,6 @@ int main()
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <sys/wait.h>
-#include <signal.h>
 
 #define MAX_PROCESSES 100
 
@@ -499,23 +497,24 @@ void exec(char** args)
     pid_t pid = fork();
     if (pid == 0)
     {
-        // 자식 프로세스에서 메모리 해제
-        int i = 0;
-        while (args[i])
-        {
-            free(args[i]);
-            i++;
-        }
-        free(args);
-
         // 자식 프로세스에서 명령어 실행
-        execvp(args[0], args);
-        perror("execvp failed");
-        exit(1);
+        if (execvp(args[0], args) < 0)
+        {
+            perror("execvp failed");
+            // execvp가 실패했을 때만 메모리 해제
+            int i = 0;
+            while (args[i])
+            {
+                free(args[i]);
+                i++;
+            }
+            free(args);
+            exit(1);
+        }
     }
     else if (pid > 0)
     {
-       // 부모 프로세스에서 자식 프로세스가 종료될 때까지 기다림
+        // 부모 프로세스에서 자식 프로세스가 종료될 때까지 기다림
         int status;
         waitpid(pid, &status, 0);
         // args 메모리 해제
@@ -536,14 +535,13 @@ int main()
 {
     pthread_t shell_tid, monitor_tid;
 
-    // 시그널 핸들러 등록
-    signal(SIGINT, signal_handler);
-
     // Shell과 Monitor 프로세스(thread로 구현) 생성
     pthread_create(&shell_tid, NULL, shell_process, NULL);
     pthread_create(&monitor_tid, NULL, monitor_process, NULL);
 
-    // 프로세스 종료까지 기다림
+    sleep(20);
+    running = 0;
+
     pthread_join(shell_tid, NULL);
     pthread_join(monitor_tid, NULL);
 
