@@ -3,7 +3,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
-#define THRESHOLD_FACTOR 2 // Threshold = Total Processes / Stack Nodes
+#define THRESHOLD_FACTOR 2 // 임계값 = 전체 프로세스 / 스택 노드
 
 typedef enum {
     FOREGROUND,
@@ -16,6 +16,7 @@ typedef struct Process
     int id;
     ProcessType type;
     struct Process* next;
+    int isPromoted; // 프로모션 여부를 나타내는 플래그
 }
 Process;
 
@@ -31,160 +32,72 @@ pthread_mutex_t stackLock;
 
 void push(StackNode** stack, Process* process)
 {
-    pthread_mutex_lock(&stackLock);
+    StackNode* newNode = (StackNode*)malloc(sizeof(StackNode));
+    process->next = NULL; // 새 프로세스의 next 포인터 초기화
 
     if (*stack == NULL)
     {
-        *stack = (StackNode*)malloc(sizeof(StackNode));
-        (*stack)->process_list = process;
-        (*stack)->next = NULL;
+        newNode->process_list = process;
+        newNode->next = NULL;
+        *stack = newNode;
     }
     else
     {
-        if (process->type == FOREGROUND)
-        {
-            process->next = (*stack)->process_list;
-            (*stack)->process_list = process;
-        }
-        else
-        {
-            Process* current = (*stack)->process_list;
-            if (current == NULL)
-            {
-                (*stack)->process_list = process;
-            }
-            else
-            {
-                while (current->next != NULL)
-                {
-                    current = current->next;
-                }
-                current->next = process;
-                process->next = NULL;
-            }
-        }
+        // 새 프로세스를 스택의 최상단 노드의 프로세스 리스트의 맨 앞에 삽입
+        process->next = (*stack)->process_list;
+        (*stack)->process_list = process;
     }
-
-    pthread_mutex_unlock(&stackLock);
 }
 
 Process* pop(StackNode** stack)
 {
-    pthread_mutex_lock(&stackLock);
-    if (*stack == NULL || (*stack)->process_list == NULL)
+    if (*stack == NULL) return NULL;
+
+    Process* process = (*stack)->process_list;
+    (*stack)->process_list = process->next;
+
+    if ((*stack)->process_list == NULL)
     {
-        pthread_mutex_unlock(&stackLock);
-        return NULL;
+        StackNode* temp = *stack;
+        *stack = (*stack)->next;
+        free(temp);
     }
 
-    StackNode* topNode = *stack;
-    Process* process = topNode->process_list;
-    topNode->process_list = process->next;
-    if (topNode->process_list == NULL)
-    {
-        *stack = topNode->next;
-        free(topNode);
-    }
-
-    pthread_mutex_unlock(&stackLock);
     return process;
 }
 
 void promote(StackNode** stack)
 {
     pthread_mutex_lock(&stackLock);
-    StackNode* current = *stack;
-    StackNode* previous = NULL;
 
-    while (current != NULL && current->next != NULL)
-    {
-        previous = current;
-        current = current->next;
-    }
-
-    if (current != NULL && previous != NULL && current->process_list != NULL)
-    {
-        Process* headProcess = current->process_list;
-        current->process_list = headProcess->next;
-        headProcess->next = previous->process_list;
-        previous->process_list = headProcess;
-
-        if (current->process_list == NULL)
-        {
-            previous->next = current->next;
-            free(current);
-        }
-    }
-
-    pthread_mutex_unlock(&stackLock);
-}
-
-void split_n_merge(StackNode** stack)
-{
-    pthread_mutex_lock(&stackLock);
-    StackNode* current = *stack;
-    int totalProcesses = 0, stackNodes = 0;
-
-    while (current != NULL)
-    {
-        stackNodes++;
-        Process* process = current->process_list;
-        while (process != NULL)
-        {
-            totalProcesses++;
-            process = process->next;
-        }
-        current = current->next;
-    }
-
-    if (stackNodes == 0)
-    {
+    if (*stack == NULL || (*stack)->next == NULL)
+    { // 스택에 노드가 없거나 하나만 있는 경우
         pthread_mutex_unlock(&stackLock);
         return;
     }
 
-    int threshold = totalProcesses / (stackNodes * THRESHOLD_FACTOR);
-    int split_occurred = 0;
-    do
+    // 스택의 마지막 노드를 찾습니다.
+    StackNode* current = *stack;
+    while (current->next->next != NULL)
     {
-        split_occurred = 0;
-        current = *stack;
+        current = current->next;
+    }
 
-        while (current != NULL)
-        {
-            Process* process = current->process_list;
-            int length = 0;
+    // 스택의 마지막 노드의 모든 프로세스를 프로모션합니다.
+    Process* processToPromote = current->next->process_list;
+    while (processToPromote != NULL)
+    {
+        processToPromote->isPromoted = 1;
+        processToPromote = processToPromote->next;
+    }
 
-            while (process != NULL)
-            {
-                length++;
-                process = process->next;
-            }
+    // 프로모션된 프로세스 리스트를 스택의 바닥으로 이동합니다.
+    StackNode* promotedNode = current->next; // 프로모션된 노드
+    current->next = NULL; // 마지막에서 두 번째 노드의 next 포인터를 NULL로 설정
 
-            if (length > threshold)
-            {
-                Process* firstHalf = current->process_list;
-                Process* secondHalf = current->process_list;
-                Process* prev = NULL;
-                for (int i = 0; i < length / 2; i++)
-                {
-                    prev = secondHalf;
-                    secondHalf = secondHalf->next;
-                }
-
-                if (prev != NULL) prev->next = NULL;
-
-                StackNode* newNode = (StackNode*)malloc(sizeof(StackNode));
-                newNode->process_list = secondHalf;
-                newNode->next = current->next;
-                current->next = newNode;
-
-                split_occurred = 1;
-                break;
-            }
-            current = current->next;
-        }
-    } while (split_occurred);
+    // 새로운 노드를 스택의 바닥에 추가합니다.
+    promotedNode->next = *stack;
+    *stack = promotedNode;
 
     pthread_mutex_unlock(&stackLock);
 }
@@ -193,35 +106,26 @@ void printProcess(Process* p)
 {
     if (p == NULL) return;
 
-    printf("Process ID: %d ", p->id);
-    if (p->type == FOREGROUND)
-    {
-        printf("Foreground\n");
-    }
-    else
-    {
-        printf("Background\n");
-    }
+    printf("Process ID: %d, Type: %s, Promoted: %s\n",
+           p->id,
+           p->type == FOREGROUND ? "Foreground" : "Background",
+           p->isPromoted ? "Yes" : "No");
 }
 
 int main()
 {
     pthread_mutex_init(&stackLock, NULL);
 
+    // 예시 프로세스 추가
     Process* process1 = (Process*)malloc(sizeof(Process));
     process1->id = 0;
     process1->type = FOREGROUND;
     process1->next = NULL;
+    process1->isPromoted = 0; // 초기값은 0 (프로모션되지 않음)
     push(&stack, process1);
 
-    Process* process2 = (Process*)malloc(sizeof(Process));
-    process2->id = 1;
-    process2->type = BACKGROUND;
-    process2->next = NULL;
-    push(&stack, process2);
-
+    // 프로모션 기능 테스트
     promote(&stack);
-    split_n_merge(&stack);
 
     Process* p;
     while ((p = pop(&stack)) != NULL)
