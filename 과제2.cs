@@ -280,6 +280,7 @@ int main()
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/wait.h>
 
 #define MAX_PROCESSES 100
 
@@ -297,45 +298,61 @@ int dq_count = 0;
 int wq_count = 0;
 int current_pid = 0;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+int running = 1;
 
 void add_to_dq(Process p)
 {
     pthread_mutex_lock(&lock) ;
-    dq[dq_count++] = p;
+    if (dq_count < MAX_PROCESSES)
+    {
+        dq[dq_count++] = p;
+    }
+    else
+    {
+        printf("DQ Overflow\n");
+    }
     pthread_mutex_unlock(&lock) ;
 }
 
 void add_to_wq(Process p)
 {
     pthread_mutex_lock(&lock) ;
-    wq[wq_count++] = p;
-    // 남은 시간이 가까운 순서로 정렬
-    for (int i = 0; i < wq_count - 1; i++)
+    if (wq_count < MAX_PROCESSES)
     {
-        for (int j = 0; j < wq_count - i - 1; j++)
+        wq[wq_count++] = p;
+        // 남은 시간이 가까운 순서로 정렬
+        for (int i = 0; i < wq_count - 1; i++)
         {
-            if (wq[j].remainingTime > wq[j + 1].remainingTime)
+            for (int j = 0; j < wq_count - i - 1; j++)
             {
-                Process temp = wq[j];
-                wq[j] = wq[j + 1];
-                wq[j + 1] = temp;
+                if (wq[j].remainingTime > wq[j + 1].remainingTime)
+                {
+                    Process temp = wq[j];
+                    wq[j] = wq[j + 1];
+                    wq[j + 1] = temp;
+                }
             }
         }
+    }
+    else
+    {
+        printf("WQ Overflow\n");
     }
     pthread_mutex_unlock(&lock) ;
 }
 
 void* shell_process(void* arg)
 {
-    while (1)
+    while (running)
     {
-        // 명령어를 실행 (여기서는 간단히 출력으로 대체)
         printf("Shell: Executing command\n");
-        // 새로운 프로세스 생성
-        Process new_process = { current_pid++, 'F', 10, ' ' }; // 예시로 remainingTime을 10으로 설정
+        pthread_mutex_lock(&lock) ;
+        Process new_process = { current_pid++, 'F', 10, ' ' };
+        pthread_mutex_unlock(&lock) ;
         add_to_dq(new_process);
-        sleep(5); // Y초 동안 sleep (예시로 5초 설정)
+        sleep(5);
     }
+    return NULL;
 }
 
 void print_queues()
@@ -361,9 +378,9 @@ void wake_up_processes()
     int i = 0;
     while (i < wq_count)
     {
+        wq[i].remainingTime--;
         if (wq[i].remainingTime <= 0)
         {
-            // WQ에서 제거하고 DQ로 이동
             Process p = wq[i];
             for (int j = i; j < wq_count - 1; j++)
             {
@@ -382,13 +399,14 @@ void wake_up_processes()
 
 void* monitor_process(void* arg)
 {
-    while (1)
+    while (running)
     {
         wake_up_processes();
         printf("Monitor: Checking queues\n");
         print_queues();
         sleep(3); // X초마다 상태 출력 (예시로 3초 설정)
     }
+    return NULL;
 }
 
 char** parse(const char* command)
@@ -444,11 +462,12 @@ int main()
 {
     pthread_t shell_tid, monitor_tid;
 
-    // Shell과 Monitor 프로세스(thread로 구현) 생성
     pthread_create(&shell_tid, NULL, shell_process, NULL);
     pthread_create(&monitor_tid, NULL, monitor_process, NULL);
 
-    // 프로세스 종료까지 기다림
+    sleep(20);
+    running = 0;
+
     pthread_join(shell_tid, NULL);
     pthread_join(monitor_tid, NULL);
 
