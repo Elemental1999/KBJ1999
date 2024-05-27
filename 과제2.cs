@@ -280,8 +280,6 @@ int main()
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <sys/wait.h>
-#include <signal.h>
 
 #define MAX_PROCESSES 100
 
@@ -331,46 +329,33 @@ void add_to_dq(Process p)
 void add_to_wq(Process p)
 {
     pthread_mutex_lock(&lock) ;
-    if (wq_count < MAX_PROCESSES)
+    wq[wq_count++] = p;
+    // 남은 시간이 가까운 순서로 정렬
+    for (int i = 0; i < wq_count - 1; i++)
     {
-        wq[wq_count++] = p;
-        // 남은 시간이 가까운 순서로 정렬
-        for (int i = 0; i < wq_count - 1; i++)
+        for (int j = 0; j < wq_count - i - 1; j++)
         {
-            for (int j = 0; j < wq_count - i - 1; j++)
+            if (wq[j].remainingTime > wq[j + 1].remainingTime)
             {
-                if (wq[j].remainingTime > wq[j + 1].remainingTime)
-                {
-                    Process temp = wq[j];
-                    wq[j] = wq[j + 1];
-                    wq[j + 1] = temp;
-                }
+                Process temp = wq[j];
+                wq[j] = wq[j + 1];
+                wq[j + 1] = temp;
             }
         }
-    }
-    else
-    {
-        printf("WQ Overflow\n");
     }
     pthread_mutex_unlock(&lock) ;
 }
 
 void* shell_process(void* arg)
 {
-    char input[100];
-    while (running)
+    while (1)
     {
-        printf("Shell: Enter a command: ");
-        fgets(input, sizeof(input), stdin);
-        input[strcspn(input, "\n")] = '\0'; // 개행 문자 제거
-
-        if (strcmp(input, "exit") == 0)
-        {
-            break;
-        }
-
-        char** args = parse(input);
-        exec(args);
+        // 명령어를 실행 (여기서는 간단히 출력으로 대체)
+        printf("Shell: Executing command\n");
+        // 새로운 프로세스 생성
+        Process new_process = { current_pid++, 'F', 10, ' ' }; // 예시로 remainingTime을 10으로 설정
+        add_to_dq(new_process);
+        sleep(5); // Y초 동안 sleep (예시로 5초 설정)
     }
     return NULL;
 }
@@ -536,14 +521,13 @@ int main()
 {
     pthread_t shell_tid, monitor_tid;
 
-    // 시그널 핸들러 등록
-    signal(SIGINT, signal_handler);
-
     // Shell과 Monitor 프로세스(thread로 구현) 생성
     pthread_create(&shell_tid, NULL, shell_process, NULL);
     pthread_create(&monitor_tid, NULL, monitor_process, NULL);
 
-    // 프로세스 종료까지 기다림
+    sleep(20);
+    running = 0;
+
     pthread_join(shell_tid, NULL);
     pthread_join(monitor_tid, NULL);
 
