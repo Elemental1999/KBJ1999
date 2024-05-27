@@ -329,26 +329,19 @@ void add_to_dq(Process p)
 void add_to_wq(Process p)
 {
     pthread_mutex_lock(&lock) ;
-    if (wq_count < MAX_PROCESSES)
+    wq[wq_count++] = p;
+    // 남은 시간이 가까운 순서로 정렬
+    for (int i = 0; i < wq_count - 1; i++)
     {
-        wq[wq_count++] = p;
-        // 남은 시간이 가까운 순서로 정렬
-        for (int i = 0; i < wq_count - 1; i++)
+        for (int j = 0; j < wq_count - i - 1; j++)
         {
-            for (int j = 0; j < wq_count - i - 1; j++)
+            if (wq[j].remainingTime > wq[j + 1].remainingTime)
             {
-                if (wq[j].remainingTime > wq[j + 1].remainingTime)
-                {
-                    Process temp = wq[j];
-                    wq[j] = wq[j + 1];
-                    wq[j + 1] = temp;
-                }
+                Process temp = wq[j];
+                wq[j] = wq[j + 1];
+                wq[j + 1] = temp;
             }
         }
-    }
-    else
-    {
-        printf("WQ Overflow\n");
     }
     pthread_mutex_unlock(&lock) ;
 }
