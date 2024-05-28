@@ -546,20 +546,22 @@ import subprocess
 import threading
 import time
 from math import gcd
+from queue import PriorityQueue, Queue
 from threading import Thread, Lock
 
 class Process :
-    def __init__(self, pid, command, duration, period, num_threads):
+    def __init__(self, pid, command, duration, period, num_threads, priority=0):
         self.pid = pid
         self.command = command
         self.duration = duration
         self.period = period
         self.num_threads = num_threads
-        self.status = "ready"  # ready, running, waiting
+        self.priority = priority
+        self.status = "ready" //ready, running, waiting
 
-# 전역 변수들은 클래스 밖에 정의되어야 합니다.
-ready_queue = []
-waiting_queue = []  # 현재 예제에서는 사용되지 않습니다.
+
+ready_queue = PriorityQueue()
+waiting_queue = Queue()
 running_processes = []
 lock = Lock()
 
@@ -576,6 +578,8 @@ def execute_command(process):
     finally:
         with lock:
             running_processes.remove(process)
+            process.status = "ready"
+            ready_queue.put((process.priority, process))
             print(f"Finished process {process.pid}")
 
 def execute_multi_threaded_command(process):
@@ -610,7 +614,7 @@ def execute_specific_command(process):
 def execute_background_command(command):
     try:
         proc = subprocess.Popen(command, shell = True)
-        proc.wait()  # 프로세스가 종료될 때까지 기다립니다.
+        proc.wait()  //프로세스가 종료될 때까지 기다립니다.
     except Exception as e:
         print(f"Error executing background command '{command}': {str(e)}")
 
@@ -636,7 +640,7 @@ def monitor_output():
                 print("] (bottom)")
             else:
                 print("No process running")
-        time.sleep(30)  # Adjust the interval as necessary
+        time.sleep(30)  //Adjust the interval as necessary
 
 def gcd_command(x, y):
     return gcd(x, y)
@@ -680,32 +684,33 @@ def parse_and_execute(commands):
     for command in commands:
         parts = command.split()
         if parts[0] == "echo":
-            process = Process(pid, " ".join(parts[1:]), int(parts[3]), int(parts[5]), int(parts[7]))
+            process = Process(pid, " ".join(parts[1:]), int(parts[3]), int(parts[5]), int(parts[7]), priority = int(parts[9]))
         elif parts[0] == "dummy":
-            process = Process(pid, "dummy", int(parts[2]), 0, 1)
+            process = Process(pid, "dummy", int(parts[2]), 0, 1, priority = int(parts[4]))
         elif parts[0] == "gcd":
-            process = Process(pid, f"gcd {parts[1]} {parts[2]}", 0, 0, 1)
+            process = Process(pid, f"gcd {parts[1]} {parts[2]}", 0, 0, 1, priority = int(parts[4]))
         elif parts[0] == "prime":
-            process = Process(pid, f"prime {parts[1]}", 0, 0, 1)
+            process = Process(pid, f"prime {parts[1]}", 0, 0, 1, priority = int(parts[3]))
         elif parts[0] == "sum":
-            process = Process(pid, f"sum {parts[1]}", 0, 0, int(parts[3]))
+            process = Process(pid, f"sum {parts[1]}", 0, 0, int(parts[3]), priority = int(parts[5]))
         else:
             continue
         with lock:
-            ready_queue.append(process)
+            ready_queue.put((process.priority, process))
         pid += 1
 
 def schedule_processes():
-    while ready_queue or running_processes:
+    while not ready_queue.empty() or running_processes:
         with lock:
-            if ready_queue and len(running_processes) < 4:
-                process = ready_queue.pop(0)
+            if not ready_queue.empty() and len(running_processes) < 4:
+                _, process = ready_queue.get()
                 running_processes.append(process)
+                process.status = "running"
                 t = Thread(target = execute_command, args = (process,))
                 t.start()
-        time.sleep(1)  # 1초 간격으로 스케줄링
+        time.sleep(1)  //1초 간격으로 스케줄링
 
-if __name__ == "__main__":  //이 부분을 수정합니다.
+if __name__ == "__main__":
     //모니터링 스레드 시작
     monitor_thread = Thread(target = monitor_output)
     monitor_thread.daemon = True
@@ -715,4 +720,4 @@ if __name__ == "__main__":  //이 부분을 수정합니다.
     with open('commands.txt', 'r') as file:
         commands = file.readlines()
     parse_and_execute(commands)
-    schedule_processes()
+    schedule_processes() 
