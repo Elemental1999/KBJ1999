@@ -542,3 +542,162 @@ int main()
 
     return 0;
 }//2-2
+import subprocess
+import threading
+import time
+import os
+from math import gcd
+from functools import reduce
+from threading import Thread, Lock
+
+# 프로세스 구조체
+class Process :
+    def __init__(self, pid, command, duration, period, num_threads):
+        self.pid = pid
+        self.command = command
+        self.duration = duration
+        self.period = period
+        self.num_threads = num_threads
+        self.status = "ready"  # ready, running, waiting
+
+# 프로세스 관리 및 동기화
+ready_queue = []
+waiting_queue = []
+running_processes = []
+lock = Lock()
+
+def execute_command(process):
+    try:
+        if process.num_threads > 1:
+            threads = []
+            for i in range(process.num_threads):
+                t = Thread(target = execute_command_with_args, args = (process.command, process.duration, process.period))
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join()
+        else:
+            if process.command.startswith('&'):
+                execute_background_command(process.command[1:])
+            else:
+                result = subprocess.run(process.command, shell = True, check = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+                print(result.stdout.decode())
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing command '{process.command}': {e.stderr.decode()}")
+    except Exception as e:
+        print(f"Error executing command '{process.command}': {str(e)}")
+
+def execute_background_command(command):
+    try:
+        subprocess.Popen(command, shell = True)
+    except Exception as e:
+        print(f"Error executing background command '{command}': {str(e)}")
+
+def execute_command_with_args(command, duration, period):
+    try:
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            result = subprocess.run(command, shell = True, check = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+            print(result.stdout.decode())
+            time.sleep(period)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing command '{command}': {e.stderr.decode()}")
+    except Exception as e:
+        print(f"Error executing command '{command}': {str(e)}")
+
+def monitor_output():
+    while True:
+        with lock:
+            if running_processes:
+                print("Running: [", end = "")
+                for process in running_processes:
+                    print(f"{process.pid}", end = ", ")
+                print("] (bottom)")
+            else:
+                print("No process running")
+        time.sleep(30)  # Adjust the interval as necessary
+
+def gcd_command(x, y):
+    return gcd(x, y)
+
+def prime_command(x):
+    sieve = [True] * (x + 1)
+    p = 2
+    while (p * p <= x):
+        if (sieve[p] == True):
+            for i in range(p * p, x + 1, p):
+                sieve[i] = False
+        p += 1
+    return len([p for p in range(2, x + 1) if sieve[p]])
+
+def sum_command(x, num_threads):
+    if num_threads > 1:
+        partial_sums = []
+        chunk_size = x // num_threads
+        threads = []
+        for i in range(num_threads):
+            start = i * chunk_size + 1
+            end = (i + 1) * chunk_size
+            if i == num_threads - 1:
+                end = x
+            t = Thread(target = partial_sum, args = (start, end, partial_sums))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+        return sum(partial_sums) % 1000000
+    else:
+        return sum(range(1, x + 1)) % 1000000
+
+def partial_sum(start, end, partial_sums):
+    partial_sum = sum(range(start, end + 1))
+    with lock:
+        partial_sums.append(partial_sum)
+
+def parse_and_execute(commands):
+    pid = 1
+    for command in commands:
+        parts = command.split()
+        if parts[0] == "echo":
+            process = Process(pid, " ".join(parts[1:]), int(parts[3]), int(parts[5]), int(parts[7]))
+        elif parts[0] == "dummy":
+            process = Process(pid, "dummy", int(parts[2]), 0, 1)
+        elif parts[0] == "gcd":
+            process = Process(pid, f"gcd {parts[1]} {parts[2]}", 0, 0, 1)
+        elif parts[0] == "prime":
+            process = Process(pid, f"prime {parts[1]}", 0, 0, 1)
+        elif parts[0] == "sum":
+            process = Process(pid, f"sum {parts[1]}", 0, 0, int(parts[3]))
+        else:
+            continue
+        with lock:
+            ready_queue.append(process)
+            pid += 1
+
+    while ready_queue or waiting_queue or running_processes:
+        with lock:
+            # 새로운 프로세스가 도착했다면 ready_queue에 추가
+            if ready_queue:
+                running_processes.extend(ready_queue[:4])
+                ready_queue = ready_queue[4:]
+
+            # 실행 중인 프로세스의 CPU 시간이 0이 되면 종료
+            for process in running_processes[:]:
+                process.duration -= 1
+                if process.duration == 0:
+                    print(f"Finished process {process.pid}")
+                    running_processes.remove(process)
+                    execute_command(process)
+
+        time.sleep(1)  # 1초 간격으로 스케줄링
+
+if __name__ == "__main__":
+    # 모니터링 스레드 시작
+    monitor_thread = Thread(target = monitor_output)
+    monitor_thread.daemon = True
+    monitor_thread.start()
+
+    # 명령어 실행
+    with open('commands.txt', 'r') as file:
+        commands = file.readlines()
+    parse_and_execute(commands) 
