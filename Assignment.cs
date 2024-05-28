@@ -60,7 +60,6 @@ void push(StackNode** stack, Process* process)
                     current = current->next;
                 }
                 current->next = process;
-                process->next = NULL;
             }
         }
     }
@@ -119,13 +118,6 @@ void promote(StackNode** stack)
         {
             previous->next = current->next;
             free(current);
-        }
-        else
-        {
-            StackNode* newNode = (StackNode*)malloc(sizeof(StackNode));
-            newNode->process_list = headProcess;
-            newNode->next = previous->next;
-            previous->next = newNode;
         }
     }
 
@@ -263,7 +255,7 @@ int main()
 
     promote(&stack);
     split_n_merge(&stack);
-    rotate(&stack); // Clock-wise 순환
+    rotate(&stack); // Clock-wise rotation
 
     Process* p;
     while ((p = pop(&stack)) != NULL)
@@ -280,6 +272,8 @@ int main()
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #define MAX_PROCESSES 100
 
@@ -289,19 +283,32 @@ ProcessState;
 typedef struct {
     int pid;
     char type; // 'F': FG, 'B': BG
-    int remainingTime; // WQ에 있을 때 남은 시간
-    char promoted; // 프로모션 여부 '*' or ' '
+    int remainingTime; // Remaining time in WQ
+    char promoted; // Promotion status '*' or ' '
     ProcessState state;
 }
 Process;
 
+// Global variables
 Process dq[MAX_PROCESSES];
 Process wq[MAX_PROCESSES];
 int dq_count = 0;
 int wq_count = 0;
 int current_pid = 0;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-int running = 1;
+volatile sig_atomic_t running = 1;
+
+// Function prototypes
+void signal_handler(int sig);
+void add_to_dq(Process p);
+void add_to_wq(Process p);
+void* shell_process(void* arg);
+void print_queues();
+void wake_up_processes();
+void* monitor_process(void* arg);
+void schedule_processes();
+char** parse(const char* command);
+void exec(char** args);
 
 void signal_handler(int sig)
 {
@@ -329,19 +336,26 @@ void add_to_dq(Process p)
 void add_to_wq(Process p)
 {
     pthread_mutex_lock(&lock) ;
-    wq[wq_count++] = p;
-    // 남은 시간이 가까운 순서로 정렬
-    for (int i = 0; i < wq_count - 1; i++)
+    if (wq_count < MAX_PROCESSES)
     {
-        for (int j = 0; j < wq_count - i - 1; j++)
+        wq[wq_count++] = p;
+        // Sort by remaining time
+        for (int i = 0; i < wq_count - 1; i++)
         {
-            if (wq[j].remainingTime > wq[j + 1].remainingTime)
+            for (int j = 0; j < wq_count - i - 1; j++)
             {
-                Process temp = wq[j];
-                wq[j] = wq[j + 1];
-                wq[j + 1] = temp;
+                if (wq[j].remainingTime > wq[j + 1].remainingTime)
+                {
+                    Process temp = wq[j];
+                    wq[j] = wq[j + 1];
+                    wq[j + 1] = temp;
+                }
             }
         }
+    }
+    else
+    {
+        printf("WQ Overflow\n");
     }
     pthread_mutex_unlock(&lock) ;
 }
@@ -352,16 +366,28 @@ void* shell_process(void* arg)
     while (running)
     {
         printf("Shell: Enter a command: ");
-        fgets(input, sizeof(input), stdin);
-        input[strcspn(input, "\n")] = '\0'; // 개행 문자 제거
+        if (fgets(input, sizeof(input), stdin) == NULL) break;
+        input[strcspn(input, "\n")] = '\0'; // Remove newline character
 
         if (strcmp(input, "exit") == 0)
         {
+            running = 0;
             break;
         }
 
         char** args = parse(input);
-        exec(args);
+        if (args)
+        {
+            exec(args);
+            // Free args memory
+            int i = 0;
+            while (args[i])
+            {
+                free(args[i]);
+                i++;
+            }
+            free(args);
+        }
     }
     return NULL;
 }
@@ -419,7 +445,7 @@ void* monitor_process(void* arg)
         wake_up_processes();
         printf("Monitor: Checking queues\n");
         print_queues();
-        sleep(3); // X초마다 상태 출력 (예시로 3초 설정)
+        sleep(3); // Print status every 3 seconds
     }
     return NULL;
 }
@@ -428,7 +454,7 @@ void schedule_processes()
 {
     pthread_mutex_lock(&lock) ;
 
-    // DQ에 있는 프로세스 실행
+    // Execute processes in DQ
     while (dq_count > 0)
     {
         Process p = dq[0];
@@ -438,16 +464,18 @@ void schedule_processes()
         }
         dq_count--;
 
-        // 프로세스 실행
+        // Execute process
         printf("Executing process %d%c%s\n", p.pid, p.type, p.promoted == '*' ? "*" : "");
         p.state = RUNNING;
-        sleep(1); // 프로세스 실행 시간 (1초)
+        pthread_mutex_unlock(&lock) ; // Unlock while executing process to avoid holding the lock during sleep
+        sleep(1); // Execution time (1 second)
+        pthread_mutex_lock(&lock) ; // Lock again to update the process state
         p.remainingTime--;
 
-        // 프로세스 상태 업데이트
+        // Update process state
         if (p.remainingTime > 0)
         {
-            // 프로세스 프로모션 확인
+            // Check process promotion
             if (p.type == 'B' && p.remainingTime <= 3)
             {
                 p.promoted = '*';
@@ -459,7 +487,6 @@ void schedule_processes()
         else
         {
             printf("Process %d%c%s finished\n", p.pid, p.type, p.promoted == '*' ? "*" : "");
-            free(p.pid); // 프로세스 메모리 해제
         }
     }
 
@@ -468,20 +495,43 @@ void schedule_processes()
 
 char** parse(const char* command)
 {
-    char** tokens = malloc(100 * sizeof(char*)); // 최대 100개의 토큰
-    char* cmd_copy = strdup(command); // 원본 문자열을 복사하여 사용
+    char** tokens = malloc(100 * sizeof(char*)); // Max 100 tokens
+    if (tokens == NULL)
+    {
+        perror("malloc failed");
+        return NULL;
+    }
+    char* cmd_copy = strdup(command); // Copy original string
+    if (cmd_copy == NULL)
+    {
+        perror("strdup failed");
+        free(tokens);
+        return NULL;
+    }
     char* token;
     int i = 0;
 
     token = strtok(cmd_copy, " ");
     while (token != NULL)
     {
-        tokens[i++] = strdup(token); // 토큰 복사하여 할당
+        tokens[i++] = strdup(token); // Copy and assign token
+        if (tokens[i - 1] == NULL)
+        {
+            perror("strdup failed");
+            // Free already allocated memory
+            for (int j = 0; j < i - 1; j++)
+            {
+                free(tokens[j]);
+            }
+            free(tokens);
+            free(cmd_copy);
+            return NULL;
+        }
         token = strtok(NULL, " ");
     }
-    tokens[i] = NULL; // 마지막 토큰은 NULL로 설정
+    tokens[i] = NULL; // Last token is NULL
 
-    free(cmd_copy); // 복사한 원본 문자열 해제
+    free(cmd_copy); // Free copied original string
     return tokens;
 }
 
@@ -490,68 +540,56 @@ void exec(char** args)
     pid_t pid = fork();
     if (pid == 0)
     {
-        // 자식 프로세스에서 명령어 실행
+        // Execute command in child process
         if (execvp(args[0], args) < 0)
         {
             perror("execvp failed");
-            // execvp가 실패했을 때만 메모리 해제
-            int i = 0;
-            while (args[i])
-            {
-                free(args[i]);
-                i++;
-            }
-            free(args);
             exit(1);
         }
     }
     else if (pid > 0)
     {
-        // 부모 프로세스에서 자식 프로세스가 종료될 때까지 기다림
+        // Wait for child process to finish in parent process
         int status;
         waitpid(pid, &status, 0);
-        // args 메모리 해제
-        int i = 0;
-        while (args[i])
-        {
-            free(args[i]); // 각 토큰에 대한 메모리 해제
-            i++;
-        }
-        free(args); // args 자체에 대한 메모리 해제
     }
     else
     {
         perror("fork failed");
     }
 }
+
 int main()
 {
+    signal(SIGINT, signal_handler); // Handle SIGINT for graceful shutdown
+
     pthread_t shell_tid, monitor_tid;
 
-    // Shell과 Monitor 프로세스(thread로 구현) 생성
+    // Create Shell and Monitor threads
     pthread_create(&shell_tid, NULL, shell_process, NULL);
     pthread_create(&monitor_tid, NULL, monitor_process, NULL);
 
-    sleep(20);
-    running = 0;
+    // Simulate scheduling process
+    while (running)
+    {
+        schedule_processes();
+        sleep(1); // Run scheduler every second
+    }
 
     pthread_join(shell_tid, NULL);
     pthread_join(monitor_tid, NULL);
 
     pthread_mutex_destroy(&lock) ;
 
-    return 0;}//2-2
-
+    return 0;
+}//2-2
 #include <iostream>
 #include <fstream>
 #include <vector>
 #include <thread>
 #include <chrono>
 #include <mutex>
-#include <condition_variable>
 #include <sstream>
-#include <atomic>
-#include <functional>
 #include <algorithm>
 
 std::mutex mu;
@@ -578,24 +616,20 @@ int main()
     while (getline(file, line))
     {
         std::istringstream iss(line);
-        std::string cmd, token;
+        std::string cmd;
         int period = 0, duration = 100, n = 1, m = 1;
-        std::vector < std::string> tokens;
 
+        std::string token;
         while (iss >> token)
         {
-            tokens.push_back(token);
+            if (token == "-p" && iss >> token) period = std::stoi(token);
+            else if (token == "-d" && iss >> token) duration = std::stoi(token);
+            else if (token == "-n" && iss >> token) n = std::stoi(token);
+            else if (token == "-m" && iss >> token) m = std::stoi(token);
+            else cmd += token + " ";
         }
 
-        for (size_t i = 0; i < tokens.size(); ++i)
-        {
-            if (tokens[i] == "-p" && i + 1 < tokens.size()) period = std::stoi(tokens[++i]);
-            else if (tokens[i] == "-d" && i + 1 < tokens.size()) duration = std::stoi(tokens[++i]);
-            else if (tokens[i] == "-n" && i + 1 < tokens.size()) n = std::stoi(tokens[++i]);
-            else if (tokens[i] == "-m" && i + 1 < tokens.size()) m = std::stoi(tokens[++i]);
-            else cmd += tokens[i] + " ";
-        }
-        if (!cmd.empty()) cmd.pop_back(); // 마지막 공백 제거
+        if (!cmd.empty()) cmd.pop_back(); // Remove trailing space
         threads.emplace_back(executeCommand, cmd, period, duration, n, m);
     }
 
@@ -613,24 +647,25 @@ void executeCommand(const std::string& command, int period, int duration, int n,
     {
         for (int i = 0; i < n; ++i)
         {
-            std::unique_lock < std::mutex > lock (mu) ;
-            if (command.substr(0, 4) == "echo")
             {
-                std::cout << command.substr(5) << std::endl; // "echo " 다음의 문자열 출력
-            }
-            else if (command.substr(0, 3) == "gcd")
-            {
-                std::stringstream ss(command.substr(4));
+                std::unique_lock < std::mutex > lock (mu) ;
+                if (command.substr(0, 5) == "echo ")
+                {
+                    std::cout << command.substr(5) << std::endl; // Print the string after "echo "
+                }
+                else if (command.substr(0, 4) == "gcd ")
+                {
+                    std::stringstream ss(command.substr(4));
         int x, y;
         ss >> x >> y;
         std::cout << gcd(x, y) << std::endl;
     }
-            else if (command.substr(0, 5) == "prime")
+                else if (command.substr(0, 6) == "prime ")
     {
         int x = std::stoi(command.substr(6));
         std::cout << countPrimes(x) << std::endl;
     }
-    else if (command.substr(0, 3) == "sum")
+    else if (command.substr(0, 4) == "sum ")
     {
         int x = std::stoi(command.substr(4));
         std::cout << sumUpTo(x, m) << std::endl;
@@ -640,8 +675,11 @@ void executeCommand(const std::string& command, int period, int duration, int n,
         dummy();
     }
 }
-
-std::this_thread::sleep_for(std::chrono::seconds(period));
+if (period > 0)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(period));
+}
+        }
     } while (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < duration) ;
 }
 
@@ -673,7 +711,7 @@ for (int i = 1; i <= x; ++i)
 {
     sum += i;
 }
-return sum * m; 
+return sum * m;
 }
 
 void dummy()
