@@ -552,6 +552,7 @@ int main()
 #include <sstream>
 #include <atomic>
 #include <functional>
+#include <algorithm>
 
 std::mutex mu;
 
@@ -565,27 +566,37 @@ void dummy();
 int main()
 {
     std::ifstream file("commands.txt");
-    std::string line;
+    if (!file)
+    {
+        std::cerr << "파일을 열 수 없습니다." << std::endl;
+        return 1; // 파일 오픈 실패
+    }
 
+    std::string line;
     std::vector<std::thread> threads;
 
     while (getline(file, line))
     {
         std::istringstream iss(line);
-        std::string cmd;
+        std::string cmd, token;
         int period = 0, duration = 100, n = 1, m = 1;
+        std::vector < std::string> tokens;
 
-        while (iss >> cmd)
+        while (iss >> token)
         {
-            if (cmd == "-p") iss >> period;
-            else if (cmd == "-d") iss >> duration;
-            else if (cmd == "-n") iss >> n;
-            else if (cmd == "-m") iss >> m;
-            else
-            {
-                threads.emplace_back(executeCommand, cmd, period, duration, n, m);
-            }
+            tokens.push_back(token);
         }
+
+        for (size_t i = 0; i < tokens.size(); ++i)
+        {
+            if (tokens[i] == "-p" && i + 1 < tokens.size()) period = std::stoi(tokens[++i]);
+            else if (tokens[i] == "-d" && i + 1 < tokens.size()) duration = std::stoi(tokens[++i]);
+            else if (tokens[i] == "-n" && i + 1 < tokens.size()) n = std::stoi(tokens[++i]);
+            else if (tokens[i] == "-m" && i + 1 < tokens.size()) m = std::stoi(tokens[++i]);
+            else cmd += tokens[i] + " ";
+        }
+        if (!cmd.empty()) cmd.pop_back(); // 마지막 공백 제거
+        threads.emplace_back(executeCommand, cmd, period, duration, n, m);
     }
 
     for (auto & t : threads) {
@@ -598,53 +609,40 @@ int main()
 void executeCommand(const std::string& command, int period, int duration, int n, int m)
 {
     auto start = std::chrono::steady_clock::now();
-
     do
     {
         for (int i = 0; i < n; ++i)
         {
-            if (command == "dummy")
+            std::unique_lock < std::mutex > lock (mu) ;
+            if (command.substr(0, 4) == "echo")
             {
-                dummy();
+                std::cout << command.substr(5) << std::endl; // "echo " 다음의 문자열 출력
             }
-            else
+            else if (command.substr(0, 3) == "gcd")
             {
-                std::stringstream ss(command);
-                std::string cmd;
-                ss >> cmd;
-                if (cmd == "echo")
-                {
-                    std::string msg;
-                    ss >> msg;
-                    std::unique_lock < std::mutex > lock (mu) ;
-                    std::cout << msg << std::endl;
-                }
-                else if (cmd == "gcd")
-                {
-                    int x, y;
-                    ss >> x >> y;
-                    std::unique_lock < std::mutex > lock (mu) ;
-                    std::cout << gcd(x, y) << std::endl;
-                }
-                else if (cmd == "prime")
-                {
-                    int x;
-                    ss >> x;
-                    std::unique_lock < std::mutex > lock (mu) ;
-                    std::cout << countPrimes(x) << std::endl;
-                }
-                else if (cmd == "sum")
-                {
-                    int x;
-                    ss >> x;
-                    std::unique_lock < std::mutex > lock (mu) ;
-                    std::cout << sumUpTo(x, m) << std::endl;
-                }
-            }
-        }
+                std::stringstream ss(command.substr(4));
+        int x, y;
+        ss >> x >> y;
+        std::cout << gcd(x, y) << std::endl;
+    }
+            else if (command.substr(0, 5) == "prime")
+    {
+        int x = std::stoi(command.substr(6));
+        std::cout << countPrimes(x) << std::endl;
+    }
+    else if (command.substr(0, 3) == "sum")
+    {
+        int x = std::stoi(command.substr(4));
+        std::cout << sumUpTo(x, m) << std::endl;
+    }
+    else if (command == "dummy")
+    {
+        dummy();
+    }
+}
 
-        std::this_thread::sleep_for(std::chrono::seconds(period));
-    } while (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < duration);
+std::this_thread::sleep_for(std::chrono::seconds(period));
+    } while (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < duration) ;
 }
 
 int gcd(int a, int b)
@@ -668,7 +666,6 @@ int countPrimes(int x)
     }
     return std::count(prime.begin(), prime.end(), true);
 }
-
 
 long long sumUpTo(int x, int m) {
     long long sum = 0;
