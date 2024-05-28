@@ -540,17 +540,14 @@ int main()
 
     pthread_mutex_destroy(&lock) ;
 
-    return 0;
-}//2-2
+    return 0;}//2-2
+
 import subprocess
 import threading
 import time
-import os
 from math import gcd
-from functools import reduce
 from threading import Thread, Lock
 
-# 프로세스 구조체
 class Process :
     def __init__(self, pid, command, duration, period, num_threads):
         self.pid = pid
@@ -560,36 +557,60 @@ class Process :
         self.num_threads = num_threads
         self.status = "ready"  # ready, running, waiting
 
-# 프로세스 관리 및 동기화
+# 전역 변수들은 클래스 밖에 정의되어야 합니다.
 ready_queue = []
-waiting_queue = []
+waiting_queue = []  # 현재 예제에서는 사용되지 않습니다.
 running_processes = []
 lock = Lock()
 
 def execute_command(process):
     try:
         if process.num_threads > 1:
-            threads = []
-            for i in range(process.num_threads):
-                t = Thread(target = execute_command_with_args, args = (process.command, process.duration, process.period))
-                threads.append(t)
-                t.start()
-            for t in threads:
-                t.join()
+            execute_multi_threaded_command(process)
         else:
-            if process.command.startswith('&'):
-                execute_background_command(process.command[1:])
-            else:
-                result = subprocess.run(process.command, shell = True, check = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
-                print(result.stdout.decode())
+            execute_single_threaded_command(process)
     except subprocess.CalledProcessError as e:
         print(f"Error executing command '{process.command}': {e.stderr.decode()}")
     except Exception as e:
         print(f"Error executing command '{process.command}': {str(e)}")
+    finally:
+        with lock:
+            running_processes.remove(process)
+            print(f"Finished process {process.pid}")
+
+def execute_multi_threaded_command(process):
+    threads = []
+    for i in range(process.num_threads):
+        t = Thread(target = execute_command_with_args, args = (process.command, process.duration, process.period))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+
+def execute_single_threaded_command(process):
+    if process.command.startswith('&'):
+        execute_background_command(process.command[1:])
+    else:
+        execute_specific_command(process)
+
+def execute_specific_command(process):
+    if "gcd" in process.command:
+        nums = process.command.split()[1:]
+        print(gcd_command(int(nums[0]), int(nums[1])))
+    elif "prime" in process.command:
+        num = int(process.command.split()[1])
+        print(prime_command(num))
+    elif "sum" in process.command:
+        num = int(process.command.split()[1])
+        print(sum_command(num, process.num_threads))
+    else:
+        result = subprocess.run(process.command, shell = True, check = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+        print(result.stdout.decode())
 
 def execute_background_command(command):
     try:
-        subprocess.Popen(command, shell = True)
+        proc = subprocess.Popen(command, shell = True)
+        proc.wait()  # 프로세스가 종료될 때까지 기다립니다.
     except Exception as e:
         print(f"Error executing background command '{command}': {str(e)}")
 
@@ -672,32 +693,26 @@ def parse_and_execute(commands):
             continue
         with lock:
             ready_queue.append(process)
-            pid += 1
+        pid += 1
 
-    while ready_queue or waiting_queue or running_processes:
+def schedule_processes():
+    while ready_queue or running_processes:
         with lock:
-            # 새로운 프로세스가 도착했다면 ready_queue에 추가
-            if ready_queue:
-                running_processes.extend(ready_queue[:4])
-                ready_queue = ready_queue[4:]
-
-            # 실행 중인 프로세스의 CPU 시간이 0이 되면 종료
-            for process in running_processes[:]:
-                process.duration -= 1
-                if process.duration == 0:
-                    print(f"Finished process {process.pid}")
-                    running_processes.remove(process)
-                    execute_command(process)
-
+            if ready_queue and len(running_processes) < 4:
+                process = ready_queue.pop(0)
+                running_processes.append(process)
+                t = Thread(target = execute_command, args = (process,))
+                t.start()
         time.sleep(1)  # 1초 간격으로 스케줄링
 
-if __name__ == "__main__":
-    # 모니터링 스레드 시작
+if __name__ == "__main__":  //이 부분을 수정합니다.
+    //모니터링 스레드 시작
     monitor_thread = Thread(target = monitor_output)
     monitor_thread.daemon = True
     monitor_thread.start()
 
-    # 명령어 실행
+   //명령어 실행
     with open('commands.txt', 'r') as file:
         commands = file.readlines()
-    parse_and_execute(commands) 
+    parse_and_execute(commands)
+    schedule_processes()
