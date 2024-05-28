@@ -542,182 +542,144 @@ int main()
 
     return 0;}//2-2
 
-import subprocess
-import threading
-import time
-from math import gcd
-from queue import PriorityQueue, Queue
-from threading import Thread, Lock
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <condition_variable>
+#include <sstream>
+#include <atomic>
+#include <functional>
 
-class Process :
-    def __init__(self, pid, command, duration, period, num_threads, priority=0):
-        self.pid = pid
-        self.command = command
-        self.duration = duration
-        self.period = period
-        self.num_threads = num_threads
-        self.priority = priority
-        self.status = "ready" //ready, running, waiting
+std::mutex mu;
+
+void executeCommand(const std::string& command, int period, int duration, int n, int m);
+
+int gcd(int a, int b);
+int countPrimes(int x);
+long long sumUpTo(int x, int m);
+void dummy();
+
+int main()
+{
+    std::ifstream file("commands.txt");
+    std::string line;
+
+    std::vector<std::thread> threads;
+
+    while (getline(file, line))
+    {
+        std::istringstream iss(line);
+        std::string cmd;
+        int period = 0, duration = 100, n = 1, m = 1;
+
+        while (iss >> cmd)
+        {
+            if (cmd == "-p") iss >> period;
+            else if (cmd == "-d") iss >> duration;
+            else if (cmd == "-n") iss >> n;
+            else if (cmd == "-m") iss >> m;
+            else
+            {
+                threads.emplace_back(executeCommand, cmd, period, duration, n, m);
+            }
+        }
+    }
+
+    for (auto & t : threads) {
+        if (t.joinable()) t.join();
+    }
+
+    return 0;
+}
+
+void executeCommand(const std::string& command, int period, int duration, int n, int m)
+{
+    auto start = std::chrono::steady_clock::now();
+
+    do
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (command == "dummy")
+            {
+                dummy();
+            }
+            else
+            {
+                std::stringstream ss(command);
+                std::string cmd;
+                ss >> cmd;
+                if (cmd == "echo")
+                {
+                    std::string msg;
+                    ss >> msg;
+                    std::unique_lock < std::mutex > lock (mu) ;
+                    std::cout << msg << std::endl;
+                }
+                else if (cmd == "gcd")
+                {
+                    int x, y;
+                    ss >> x >> y;
+                    std::unique_lock < std::mutex > lock (mu) ;
+                    std::cout << gcd(x, y) << std::endl;
+                }
+                else if (cmd == "prime")
+                {
+                    int x;
+                    ss >> x;
+                    std::unique_lock < std::mutex > lock (mu) ;
+                    std::cout << countPrimes(x) << std::endl;
+                }
+                else if (cmd == "sum")
+                {
+                    int x;
+                    ss >> x;
+                    std::unique_lock < std::mutex > lock (mu) ;
+                    std::cout << sumUpTo(x, m) << std::endl;
+                }
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(period));
+    } while (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < duration);
+}
+
+int gcd(int a, int b)
+{
+    return b == 0 ? a : gcd(b, a % b);
+}
+
+int countPrimes(int x)
+{
+    std::vector<bool> prime(x +1, true);
+    prime[0] = prime[1] = false;
+    for (int p = 2; p * p <= x; ++p)
+    {
+        if (prime[p])
+        {
+            for (int i = p * p; i <= x; i += p)
+            {
+                prime[i] = false;
+            }
+        }
+    }
+    return std::count(prime.begin(), prime.end(), true);
+}
 
 
-ready_queue = PriorityQueue()
-waiting_queue = Queue()
-running_processes = []
-lock = Lock()
+long long sumUpTo(int x, int m) {
+    long long sum = 0;
+for (int i = 1; i <= x; ++i)
+{
+    sum += i;
+}
+return sum * m; 
+}
 
-def execute_command(process):
-    try:
-        if process.num_threads > 1:
-            execute_multi_threaded_command(process)
-        else:
-            execute_single_threaded_command(process)
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing command '{process.command}': {e.stderr.decode()}")
-    except Exception as e:
-        print(f"Error executing command '{process.command}': {str(e)}")
-    finally:
-        with lock:
-            running_processes.remove(process)
-            process.status = "ready"
-            ready_queue.put((process.priority, process))
-            print(f"Finished process {process.pid}")
-
-def execute_multi_threaded_command(process):
-    threads = []
-    for i in range(process.num_threads):
-        t = Thread(target = execute_command_with_args, args = (process.command, process.duration, process.period))
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
-
-def execute_single_threaded_command(process):
-    if process.command.startswith('&'):
-        execute_background_command(process.command[1:])
-    else:
-        execute_specific_command(process)
-
-def execute_specific_command(process):
-    if "gcd" in process.command:
-        nums = process.command.split()[1:]
-        print(gcd_command(int(nums[0]), int(nums[1])))
-    elif "prime" in process.command:
-        num = int(process.command.split()[1])
-        print(prime_command(num))
-    elif "sum" in process.command:
-        num = int(process.command.split()[1])
-        print(sum_command(num, process.num_threads))
-    else:
-        result = subprocess.run(process.command, shell = True, check = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
-        print(result.stdout.decode())
-
-def execute_background_command(command):
-    try:
-        proc = subprocess.Popen(command, shell = True)
-        proc.wait()  //프로세스가 종료될 때까지 기다립니다.
-    except Exception as e:
-        print(f"Error executing background command '{command}': {str(e)}")
-
-def execute_command_with_args(command, duration, period):
-    try:
-        start_time = time.time()
-        while time.time() - start_time < duration:
-            result = subprocess.run(command, shell = True, check = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
-            print(result.stdout.decode())
-            time.sleep(period)
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing command '{command}': {e.stderr.decode()}")
-    except Exception as e:
-        print(f"Error executing command '{command}': {str(e)}")
-
-def monitor_output():
-    while True:
-        with lock:
-            if running_processes:
-                print("Running: [", end = "")
-                for process in running_processes:
-                    print(f"{process.pid}", end = ", ")
-                print("] (bottom)")
-            else:
-                print("No process running")
-        time.sleep(30)  //Adjust the interval as necessary
-
-def gcd_command(x, y):
-    return gcd(x, y)
-
-def prime_command(x):
-    sieve = [True] * (x + 1)
-    p = 2
-    while (p * p <= x):
-        if (sieve[p] == True):
-            for i in range(p * p, x + 1, p):
-                sieve[i] = False
-        p += 1
-    return len([p for p in range(2, x + 1) if sieve[p]])
-
-def sum_command(x, num_threads):
-    if num_threads > 1:
-        partial_sums = []
-        chunk_size = x // num_threads
-        threads = []
-        for i in range(num_threads):
-            start = i * chunk_size + 1
-            end = (i + 1) * chunk_size
-            if i == num_threads - 1:
-                end = x
-            t = Thread(target = partial_sum, args = (start, end, partial_sums))
-            threads.append(t)
-            t.start()
-        for t in threads:
-            t.join()
-        return sum(partial_sums) % 1000000
-    else:
-        return sum(range(1, x + 1)) % 1000000
-
-def partial_sum(start, end, partial_sums):
-    partial_sum = sum(range(start, end + 1))
-    with lock:
-        partial_sums.append(partial_sum)
-
-def parse_and_execute(commands):
-    pid = 1
-    for command in commands:
-        parts = command.split()
-        if parts[0] == "echo":
-            process = Process(pid, " ".join(parts[1:]), int(parts[3]), int(parts[5]), int(parts[7]), priority = int(parts[9]))
-        elif parts[0] == "dummy":
-            process = Process(pid, "dummy", int(parts[2]), 0, 1, priority = int(parts[4]))
-        elif parts[0] == "gcd":
-            process = Process(pid, f"gcd {parts[1]} {parts[2]}", 0, 0, 1, priority = int(parts[4]))
-        elif parts[0] == "prime":
-            process = Process(pid, f"prime {parts[1]}", 0, 0, 1, priority = int(parts[3]))
-        elif parts[0] == "sum":
-            process = Process(pid, f"sum {parts[1]}", 0, 0, int(parts[3]), priority = int(parts[5]))
-        else:
-            continue
-        with lock:
-            ready_queue.put((process.priority, process))
-        pid += 1
-
-def schedule_processes():
-    while not ready_queue.empty() or running_processes:
-        with lock:
-            if not ready_queue.empty() and len(running_processes) < 4:
-                _, process = ready_queue.get()
-                running_processes.append(process)
-                process.status = "running"
-                t = Thread(target = execute_command, args = (process,))
-                t.start()
-        time.sleep(1)  //1초 간격으로 스케줄링
-
-if __name__ == "__main__":
-    //모니터링 스레드 시작
-    monitor_thread = Thread(target = monitor_output)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-
-   //명령어 실행
-    with open('commands.txt', 'r') as file:
-        commands = file.readlines()
-    parse_and_execute(commands)
-    schedule_processes() 
+void dummy()
+{
+    // 아무 일도 하지 않음
+}

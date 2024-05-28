@@ -71,9 +71,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-		<OutDir>..\..\Elemental1999\KBJ1999\Debug</OutDir>
-    <OutDir>..\..\Elemental1999\KBJ1999\Debug</OutDir>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+ Temporary merge branch 1
+    <OutDir>..\x64\Debug</OutDir>
 =========
     <OutDir>.\x64\Debug</OutDir>
 >>>>>>>>> Temporary merge branch 2:Assignment/Assignment.vcxproj
