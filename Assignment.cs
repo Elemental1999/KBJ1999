@@ -1,270 +1,196 @@
-﻿#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <unistd.h>
+﻿#include <iostream>
+#include <cstdlib> // rand() 함수 사용을 위함
+#include <ctime>   // 시간 기반 시드 생성을 위함
+#include <list>    // 리스트 컨테이너 사용을 위함
+#include <mutex>   // 뮤텍스 사용을 위함
+#include <thread>  // 스레드 사용을 위함
+#include <chrono>  // 시간 기반 대기를 위함
 
-#define THRESHOLD_FACTOR 2 // Threshold = Total Processes / Stack Nodes
+using namespace std;
 
-typedef enum {
-    FOREGROUND,
-    BACKGROUND
-}
-ProcessType;
-
-typedef struct Process
+// 프로세스 구조체
+struct Process
 {
-    int id;
-    ProcessType type;
-    struct Process* next;
-}
-Process;
+    int pid;
+    bool isForeground; // foreground인 경우 true, background인 경우 false
+    int remainingTime; // 백그라운드 프로세스의 남은 시간
+    Process(int id, bool fg = true) : pid(id), isForeground(fg), remainingTime(0) { }
+};
 
-typedef struct StackNode
+// 스택 노드 구조체
+struct StackNode
 {
-    Process* process_list;
-    struct StackNode* next;
-}
-StackNode;
+    list<Process> processList;
+    StackNode* next;
+    StackNode() : next(nullptr) { }
+};
 
-StackNode* stack = NULL;
-pthread_mutex_t stackLock;
-
-void push(StackNode** stack, Process* process)
+// 동적 큐 클래스
+class DynamicQueue
 {
-    pthread_mutex_lock(&stackLock);
+    private:
+    StackNode* top;    // 스택의 맨 위 (foreground 프로세스)
+    StackNode* bottom; // 스택의 맨 아래 (background 프로세스)
+    mutex mtx;         // 스레드 안전을 위한 뮤텍스
 
-    if (*stack == NULL)
+    public:
+    DynamicQueue() : top(nullptr), bottom(nullptr) { }
+
+    // 프로세스 enqueue 메서드
+    void enqueue(Process p)
     {
-        *stack = (StackNode*)malloc(sizeof(StackNode));
-        (*stack)->process_list = process;
-        (*stack)->next = NULL;
+        lock_guard < mutex > lock (mtx) ;
+        StackNode* targetNode = p.isForeground ? top : bottom;
+        targetNode = ensureNode(targetNode);
+        targetNode->processList.push_back(p);
     }
-    else
+
+    // 프로세스 dequeue 메서드
+    Process dequeue()
     {
-        if (process->type == FOREGROUND)
+        lock_guard < mutex > lock (mtx) ;
+        StackNode* targetNode = top;
+        if (top && !top->processList.empty())
         {
-            process->next = (*stack)->process_list;
-            (*stack)->process_list = process;
-        }
-        else
-        {
-            Process* current = (*stack)->process_list;
-            if (current == NULL)
+            Process p = top->processList.front();
+            top->processList.pop_front();
+            if (top->processList.empty())
             {
-                (*stack)->process_list = process;
+                top = top->next;
+                delete targetNode;
+            }
+            return p;
+        }
+        return Process(-1, true); // 큐가 비어있는 경우 더미 프로세스 반환
+    }
+
+    // 프로세스 프로모션 메서드
+    void promote()
+    {
+        lock_guard < mutex > lock (mtx) ;
+        if (top && top->next)
+        {
+            StackNode* promotedNode = top;
+            top = top->next;
+            promotedNode->next = nullptr;
+            if (promotedNode->processList.empty())
+            {
+                delete promotedNode;
             }
             else
             {
-                while (current->next != NULL)
+                StackNode* targetNode = top;
+                while (targetNode->next)
                 {
-                    current = current->next;
+                    targetNode = targetNode->next;
                 }
-                current->next = process;
+                targetNode->next = promotedNode;
             }
         }
     }
 
-    pthread_mutex_unlock(&stackLock);
-}
-
-Process* pop(StackNode** stack)
-{
-    pthread_mutex_lock(&stackLock);
-    if (*stack == NULL || (*stack)->process_list == NULL)
+    // 프로세스 분할 및 병합 메서드
+    void split_n_merge(int threshold)
     {
-        pthread_mutex_unlock(&stackLock);
-        return NULL;
-    }
-
-    StackNode* topNode = *stack;
-    Process* process = topNode->process_list;
-    topNode->process_list = process->next;
-    if (topNode->process_list == NULL)
-    {
-        *stack = topNode->next;
-        free(topNode);
-    }
-
-    pthread_mutex_unlock(&stackLock);
-    return process;
-}
-
-void promote(StackNode** stack)
-{
-    pthread_mutex_lock(&stackLock);
-    if (*stack == NULL || (*stack)->next == NULL)
-    {
-        pthread_mutex_unlock(&stackLock);
-        return;
-    }
-
-    StackNode* current = *stack;
-    StackNode* previous = NULL;
-
-    while (current->next != NULL)
-    {
-        previous = current;
-        current = current->next;
-    }
-
-    if (current != NULL && previous != NULL && current->process_list != NULL)
-    {
-        Process* headProcess = current->process_list;
-        current->process_list = headProcess->next;
-        headProcess->next = previous->process_list;
-        previous->process_list = headProcess;
-
-        if (current->process_list == NULL)
+        lock_guard < mutex > lock (mtx) ;
+        StackNode* targetNode = top;
+        while (targetNode)
         {
-            previous->next = current->next;
-            free(current);
-        }
-    }
-
-    pthread_mutex_unlock(&stackLock);
-}
-
-void split_n_merge(StackNode** stack)
-{
-    pthread_mutex_lock(&stackLock);
-    StackNode* current = *stack;
-    int totalProcesses = 0, stackNodes = 0;
-
-    while (current != NULL)
-    {
-        stackNodes++;
-        Process* process = current->process_list;
-        while (process != NULL)
-        {
-            totalProcesses++;
-            process = process->next;
-        }
-        current = current->next;
-    }
-
-    if (stackNodes == 0)
-    {
-        pthread_mutex_unlock(&stackLock);
-        return;
-    }
-
-    int threshold = totalProcesses / (stackNodes * THRESHOLD_FACTOR);
-    int split_occurred = 0;
-    do
-    {
-        split_occurred = 0;
-        current = *stack;
-
-        while (current != NULL)
-        {
-            Process* process = current->process_list;
-            int length = 0;
-
-            while (process != NULL)
+            if (targetNode->processList.size() > threshold)
             {
-                length++;
-                process = process->next;
+                StackNode* newNode = new StackNode();
+                auto it = targetNode->processList.begin();
+                advance(it, threshold / 2);
+                newNode->processList.splice(newNode->processList.begin(), targetNode->processList, targetNode->processList.begin(), it);
+                newNode->next = targetNode->next;
+                targetNode->next = newNode;
             }
+            targetNode = targetNode->next;
+        }
+    }
 
-            if (length > threshold)
+    // 프로세스 유형(foreground/background)에 대한 노드의 존재 여부 확인 메서드
+    StackNode* ensureNode(StackNode* node)
+    {
+        if (!node)
+        {
+            node = new StackNode();
+            if (node->processList.empty())
             {
-                Process* firstHalf = current->process_list;
-                Process* secondHalf = current->process_list;
-                Process* prev = NULL;
-                for (int i = 0; i < length / 2; i++)
+                if (node->next == nullptr)
                 {
-                    prev = secondHalf;
-                    secondHalf = secondHalf->next;
+                    if (node->processList.empty())
+                        top = bottom = node;
                 }
+                else if (node->processList.empty())
+                    top = node;
+            }
+            else
+            {
+                if (node->next == nullptr)
+                {
+                    if (node->processList.empty())
+                        bottom = node;
+                }
+            }
+        }
+        return node;
+    }
 
-                if (prev != NULL) prev->next = NULL;
-
-                StackNode* newNode = (StackNode*)malloc(sizeof(StackNode));
-                newNode->process_list = secondHalf;
-                newNode->next = current->next;
-                current->next = newNode;
-
-                split_occurred = 1;
-                break;
+    // 큐 내용 출력 메서드
+    void printQueue()
+    {
+        lock_guard < mutex > lock (mtx) ;
+        cout << "Foreground Processes:" << endl;
+        StackNode* current = top;
+        while (current)
+        {
+            for (const auto&process : current->processList) {
+                cout << process.pid << (process.isForeground ? " (F)" : " (B)");
+                if (!process.isForeground)
+                    cout << " - 남은 시간: " << process.remainingTime;
+                cout << endl;
             }
             current = current->next;
         }
-    } while (split_occurred);
+    }
+};
 
-    pthread_mutex_unlock(&stackLock);
-}
-
-void rotate(StackNode** stack)
+// 프로세스 시뮬레이션 함수
+void simulateProcesses(DynamicQueue& queue)
 {
-    pthread_mutex_lock(&stackLock);
-    if (*stack == NULL || (*stack)->next == NULL)
-    {
-        pthread_mutex_unlock(&stackLock);
-        return;
-    }
+    srand(time(nullptr));
+    int count = 0;
+    while (count < 20)
+    { // 20번의 반복으로
+        // 프로세스 생성 시뮬레이션
+        int pid = rand() % 100; // 랜덤 프로세스 ID 생성
+        bool isForeground = rand() % 2 == 0; // 프로세스가 foreground 또는 background인지 랜덤으로 결정
+        Process p(pid, isForeground);
+        if (!isForeground)
+            p.remainingTime = rand() % 10 + 1; // 백그라운드 프로세스의 남은 시간 랜덤 생성
 
-    StackNode* current = *stack;
-    StackNode* previous = NULL;
+        // 프로세스 enqueue
+        queue.enqueue(p);
 
-    while (current->next != NULL)
-    {
-        previous = current;
-        current = current->next;
-    }
+        // 프로세스 프로모션 및 분할/병합
+        queue.promote();
+        queue.split_n_merge(5); // 데모를 위해 임계값을 5로 설정
 
-    if (previous != NULL)
-    {
-        previous->next = NULL;
-        current->next = *stack;
-        *stack = current;
-    }
+        // 큐 출력
+        queue.printQueue();
 
-    pthread_mutex_unlock(&stackLock);
-}
+        // 실제 시간 처리를 시뮬레이션하기 위해 짧은 시간 동안 sleep
+        this_thread::sleep_for(chrono::seconds(1));
 
-void printProcess(Process* p)
-{
-    if (p == NULL) return;
-
-    printf("Process ID: %d ", p->id);
-    if (p->type == FOREGROUND)
-    {
-        printf("Type: Foreground\n");
-    }
-    else
-    {
-        printf("Type: Background\n");
+        count++;
     }
 }
 
 int main()
 {
-    pthread_mutex_init(&stackLock, NULL);
-
-    Process* process1 = (Process*)malloc(sizeof(Process));
-    process1->id = 0;
-    process1->type = FOREGROUND;
-    process1->next = NULL;
-    push(&stack, process1);
-
-    Process* process2 = (Process*)malloc(sizeof(Process));
-    process2->id = 1;
-    process2->type = BACKGROUND;
-    process2->next = NULL;
-    push(&stack, process2);
-
-    promote(&stack);
-    split_n_merge(&stack);
-    rotate(&stack); // Clock-wise rotation
-
-    Process* p;
-    while ((p = pop(&stack)) != NULL)
-    {
-        printProcess(p);
-        free(p);
-    }
-
-    pthread_mutex_destroy(&stackLock);
+    DynamicQueue queue;
+    simulateProcesses(queue);
     return 0;
 }//2-1
 #include <stdio.h>
