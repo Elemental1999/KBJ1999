@@ -717,4 +717,4 @@ return sum * m;
 void dummy()
 {
     // 아무 일도 하지 않음
-}
+}//2-3
