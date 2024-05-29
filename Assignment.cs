@@ -193,320 +193,251 @@ int main()
     simulateProcesses(queue);
     return 0;
 }//2-1
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <signal.h>
-#include <sys/wait.h>
+#include <iostream>
+#include <cstdlib> // for exit()
+#include <cstring> // for strtok(), strtok_r()
+#include <unistd.h> // for fork(), execvp(), wait()
+#include <thread>
+#include <chrono>
+#include <list>
+#include <mutex>
+#include <algorithm>
+#include <sys/wait.h> // for wait function
 
-#define MAX_PROCESSES 100
+using namespace std;
 
-typedef enum { RUNNING, READY, BLOCKED }
-ProcessState;
-
-typedef struct {
-    int pid;
-    char type; // 'F': FG, 'B': BG
-    int remainingTime; // Remaining time in WQ
-    char promoted; // Promotion status '*' or ' '
-    ProcessState state;
-}
-Process;
-
-// Global variables
-Process dq[MAX_PROCESSES];
-Process wq[MAX_PROCESSES];
-int dq_count = 0;
-int wq_count = 0;
-int current_pid = 0;
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-volatile sig_atomic_t running = 1;
-
-// Function prototypes
-void signal_handler(int sig);
-void add_to_dq(Process p);
-void add_to_wq(Process p);
-void* shell_process(void* arg);
-void print_queues();
-void wake_up_processes();
-void* monitor_process(void* arg);
-void schedule_processes();
-char** parse(const char* command);
-void exec(char** args);
-
-void signal_handler(int sig)
+// 프로세스 구조체
+struct Process
 {
-    if (sig == SIGINT)
-    {
-        printf("\nSIGINT received, shutting down...\n");
-        running = 0;
-    }
-}
+    int pid; // 프로세스 ID
+    bool isForeground; // 포그라운드인 경우 true, 백그라운드인 경우 false
+    int remainingTime; // 백그라운드 프로세스의 남은 시간
+    Process(int id, bool fg = true) : pid(id), isForeground(fg), remainingTime(0) { }
+};
 
-void add_to_dq(Process p)
+// 스택 노드 구조체
+struct StackNode
 {
-    pthread_mutex_lock(&lock) ;
-    if (dq_count < MAX_PROCESSES)
-    {
-        dq[dq_count++] = p;
-    }
-    else
-    {
-        printf("DQ Overflow\n");
-    }
-    pthread_mutex_unlock(&lock) ;
-}
+    list<Process> processList; // 프로세스 리스트
+    StackNode* next; // 다음 노드를 가리키는 포인터
+    StackNode() : next(nullptr) { }
+};
 
-void add_to_wq(Process p)
+class DynamicQueue
 {
-    pthread_mutex_lock(&lock) ;
-    if (wq_count < MAX_PROCESSES)
+    private:
+    StackNode* top; // 스택의 맨 위 (포그라운드 프로세스)
+    StackNode* bottom; // 스택의 맨 아래 (백그라운드 프로세스)
+    mutex mtx; // 스레드 안전을 보장하기 위한 뮤텍스
+
+    public:
+    DynamicQueue() : top(nullptr), bottom(nullptr) { }
+
+    // 프로세스를 큐에 추가
+    void enqueue(Process p)
     {
-        wq[wq_count++] = p;
-        // Sort by remaining time
-        for (int i = 0; i < wq_count - 1; i++)
+        lock_guard < mutex > lock (mtx) ;
+        StackNode* targetNode = p.isForeground ? top : bottom;
+        targetNode = ensureNode(targetNode);
+        targetNode->processList.push_back(p);
+    }
+
+    // 프로세스를 큐에서 제거
+    Process dequeue()
+    {
+        lock_guard < mutex > lock (mtx) ;
+        StackNode* targetNode = top;
+        if (top && !top->processList.empty())
         {
-            for (int j = 0; j < wq_count - i - 1; j++)
+            Process p = top->processList.front();
+            top->processList.pop_front();
+            if (top->processList.empty())
             {
-                if (wq[j].remainingTime > wq[j + 1].remainingTime)
+                top = top->next;
+                delete targetNode;
+            }
+            return p;
+        }
+        return Process(-1, true); // 큐가 비어 있는 경우 더미 프로세스 반환
+    }
+
+    // 프로세스를 프로모션
+    void promote()
+    {
+        lock_guard < mutex > lock (mtx) ;
+        if (top && top->next)
+        {
+            StackNode* promotedNode = top;
+            top = top->next;
+            promotedNode->next = nullptr;
+            if (promotedNode->processList.empty())
+            {
+                delete promotedNode;
+            }
+            else
+            {
+                StackNode* targetNode = top;
+                while (targetNode->next)
                 {
-                    Process temp = wq[j];
-                    wq[j] = wq[j + 1];
-                    wq[j + 1] = temp;
+                    targetNode = targetNode->next;
+                }
+                targetNode->next = promotedNode;
+            }
+        }
+    }
+
+    // 프로세스를 분할하거나 병합
+    void split_n_merge(int threshold)
+    {
+        lock_guard < mutex > lock (mtx) ;
+        StackNode* targetNode = top;
+        while (targetNode)
+        {
+            if (targetNode->processList.size() > threshold)
+            {
+                StackNode* newNode = new StackNode();
+                auto it = targetNode->processList.begin();
+                advance(it, threshold / 2);
+                newNode->processList.splice(newNode->processList.begin(), targetNode->processList, targetNode->processList.begin(), it);
+                newNode->next = targetNode->next;
+                targetNode->next = newNode;
+            }
+            targetNode = targetNode->next;
+        }
+    }
+
+    // 주어진 프로세스 유형 (포그라운드/백그라운드)에 대한 노드의 존재 여부 확인
+    StackNode* ensureNode(StackNode* node)
+    {
+        if (!node)
+        {
+            node = new StackNode();
+            if (node->processList.empty())
+            {
+                if (node->next == nullptr)
+                {
+                    if (node->processList.empty())
+                        top = bottom = node;
+                }
+                else if (node->processList.empty())
+                    top = node;
+            }
+            else
+            {
+                if (node->next == nullptr)
+                {
+                    if (node->processList.empty())
+                        bottom = node;
                 }
             }
         }
+        return node;
     }
-    else
+
+    // 큐의 내용을 출력
+    void printQueue()
     {
-        printf("WQ Overflow\n");
-    }
-    pthread_mutex_unlock(&lock) ;
-}
-
-void* shell_process(void* arg)
-{
-    char input[100];
-    while (running)
-    {
-        printf("Shell: Enter a command: ");
-        if (fgets(input, sizeof(input), stdin) == NULL) break;
-        input[strcspn(input, "\n")] = '\0'; // Remove newline character
-
-        if (strcmp(input, "exit") == 0)
+        lock_guard < mutex > lock (mtx) ;
+        cout << "DQ: ";
+        StackNode* current = bottom;
+        while (current)
         {
-            running = 0;
-            break;
-        }
-
-        char** args = parse(input);
-        if (args)
-        {
-            exec(args);
-            // Free args memory
-            int i = 0;
-            while (args[i])
-            {
-                free(args[i]);
-                i++;
+            for (const auto&process : current->processList) {
+                cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
             }
-            free(args);
-        }
-    }
-    return NULL;
-}
-
-void print_queues()
-{
-    pthread_mutex_lock(&lock) ;
-    printf("DQ: ");
-    for (int i = 0; i < dq_count; i++)
-    {
-        printf("%d%c%s(%s) ", dq[i].pid, dq[i].type, dq[i].promoted == '*' ? "*" : "",
-               dq[i].state == RUNNING ? "RUNNING" :
-               dq[i].state == READY ? "READY" : "BLOCKED");
-    }
-    printf("\nWQ: ");
-    for (int i = 0; i < wq_count; i++)
-    {
-        printf("%d%c:%d(%s) ", wq[i].pid, wq[i].type, wq[i].remainingTime,
-               wq[i].state == READY ? "READY" : "BLOCKED");
-    }
-    printf("\n");
-    pthread_mutex_unlock(&lock) ;
-}
-
-void wake_up_processes()
-{
-    pthread_mutex_lock(&lock) ;
-    int i = 0;
-    while (i < wq_count)
-    {
-        wq[i].remainingTime--;
-        if (wq[i].remainingTime <= 0)
-        {
-            Process p = wq[i];
-            for (int j = i; j < wq_count - 1; j++)
+            if (current == top)
             {
-                wq[j] = wq[j + 1];
+                cout << " (top)";
             }
-            wq_count--;
-            p.state = READY;
-            add_to_dq(p);
-        }
-        else
-        {
-            i++;
-        }
-    }
-    pthread_mutex_unlock(&lock) ;
-}
-
-void* monitor_process(void* arg)
-{
-    while (running)
-    {
-        wake_up_processes();
-        printf("Monitor: Checking queues\n");
-        print_queues();
-        sleep(3); // Print status every 3 seconds
-    }
-    return NULL;
-}
-
-void schedule_processes()
-{
-    pthread_mutex_lock(&lock) ;
-
-    // Execute processes in DQ
-    while (dq_count > 0)
-    {
-        Process p = dq[0];
-        for (int i = 0; i < dq_count - 1; i++)
-        {
-            dq[i] = dq[i + 1];
-        }
-        dq_count--;
-
-        // Execute process
-        printf("Executing process %d%c%s\n", p.pid, p.type, p.promoted == '*' ? "*" : "");
-        p.state = RUNNING;
-        pthread_mutex_unlock(&lock) ; // Unlock while executing process to avoid holding the lock during sleep
-        sleep(1); // Execution time (1 second)
-        pthread_mutex_lock(&lock) ; // Lock again to update the process state
-        p.remainingTime--;
-
-        // Update process state
-        if (p.remainingTime > 0)
-        {
-            // Check process promotion
-            if (p.type == 'B' && p.remainingTime <= 3)
+            if (current == bottom)
             {
-                p.promoted = '*';
-                printf("Process %d%c%s promoted\n", p.pid, p.type, p.promoted);
+                cout << " (bottom)";
             }
-            p.state = BLOCKED;
-            add_to_wq(p);
+            cout << "-";
+            current = current->next;
         }
-        else
-        {
-            printf("Process %d%c%s finished\n", p.pid, p.type, p.promoted == '*' ? "*" : "");
-        }
+        cout << endl;
     }
+};
 
-    pthread_mutex_unlock(&lock) ;
+// 프로세스 시뮬레이션 함수
+void simulateProcesses(DynamicQueue& queue)
+{
+    srand(time(nullptr));
+    int count = 0;
+    while (count < 20)
+    { // 20번 반복하여 시뮬레이션 실행
+        // 프로세스 생성 시뮬레이션
+        int pid = rand() % 100; // 임의의 프로세스 ID 생성
+        bool isForeground = rand() % 2 == 0; // 프로세스가 포그라운드인지 백그라운드인지 무작위로 결정
+        Process p(pid, isForeground);
+        if (!isForeground)
+            p.remainingTime = rand() % 10 + 1; // 백그라운드 프로세스의 임의의 남은 시간 설정
+
+        // 프로세스 큐에 추가
+        queue.enqueue(p);
+
+        // 프로세스 프로모션 및 분할/병합
+        queue.promote();
+        queue.split_n_merge(5); // 5를 임의의 임계값으로 설정 (시연용)
+
+        // 큐 출력
+        queue.printQueue();
+
+        // 실제 시간 경과 시뮬레이션
+        this_thread::sleep_for(chrono::seconds(1));
+
+        count++;
+    }
 }
-
+// Parse 함수: 명령을 입력 받아 토큰으로 파싱하여 반환
 char** parse(const char* command)
 {
-    char** tokens = malloc(100 * sizeof(char*)); // Max 100 tokens
-    if (tokens == NULL)
-    {
-        perror("malloc failed");
-        return NULL;
-    }
-    char* cmd_copy = strdup(command); // Copy original string
-    if (cmd_copy == NULL)
-    {
-        perror("strdup failed");
-        free(tokens);
-        return NULL;
-    }
-    char* token;
+    char** args = new char*[64]; // 최대 64개의 토큰을 저장할 수 있는 배열
+    char* temp = strdup(command); // 입력 명령을 복제하여 임시로 저장
+
     int i = 0;
-
-    token = strtok(cmd_copy, " ");
-    while (token != NULL)
+    char* token = strtok(temp, " "); // 공백을 기준으로 첫 번째 토큰 추출
+    while (token != nullptr)
     {
-        tokens[i++] = strdup(token); // Copy and assign token
-        if (tokens[i - 1] == NULL)
-        {
-            perror("strdup failed");
-            // Free already allocated memory
-            for (int j = 0; j < i - 1; j++)
-            {
-                free(tokens[j]);
-            }
-            free(tokens);
-            free(cmd_copy);
-            return NULL;
-        }
-        token = strtok(NULL, " ");
+        args[i++] = token; // 추출한 토큰을 배열에 저장
+        token = strtok(nullptr, " "); // 다음 토큰 추출
     }
-    tokens[i] = NULL; // Last token is NULL
+    args[i] = nullptr; // 배열의 끝을 나타내는 nullptr 추가
 
-    free(cmd_copy); // Free copied original string
-    return tokens;
+    delete[] temp; // 복제한 문자열 메모리 해제
+    return args;
 }
 
+// Exec 함수: 명령어를 실행
 void exec(char** args)
 {
-    pid_t pid = fork();
-    if (pid == 0)
+    pid_t pid = fork(); // 새로운 프로세스 생성
+    if (pid == -1)
     {
-        // Execute command in child process
-        if (execvp(args[0], args) < 0)
+        perror("fork failed");
+        exit(EXIT_FAILURE);
+    }
+    else if (pid == 0)
+    {
+        // 자식 프로세스일 경우
+        if (execvp(args[0], args) == -1)
         {
             perror("execvp failed");
-            exit(1);
+            exit(EXIT_FAILURE);
         }
-    }
-    else if (pid > 0)
-    {
-        // Wait for child process to finish in parent process
-        int status;
-        waitpid(pid, &status, 0);
     }
     else
     {
-        perror("fork failed");
+        // 부모 프로세스일 경우
+        wait(nullptr); // 자식 프로세스의 종료를 기다림
     }
 }
 
 int main()
 {
-    signal(SIGINT, signal_handler); // Handle SIGINT for graceful shutdown
-
-    pthread_t shell_tid, monitor_tid;
-
-    // Create Shell and Monitor threads
-    pthread_create(&shell_tid, NULL, shell_process, NULL);
-    pthread_create(&monitor_tid, NULL, monitor_process, NULL);
-
-    // Simulate scheduling process
-    while (running)
-    {
-        schedule_processes();
-        sleep(1); // Run scheduler every second
-    }
-
-    pthread_join(shell_tid, NULL);
-    pthread_join(monitor_tid, NULL);
-
-    pthread_mutex_destroy(&lock) ;
-
+    DynamicQueue queue;
+    simulateProcesses(queue);
     return 0;
 }//2-2
 #include <iostream>
