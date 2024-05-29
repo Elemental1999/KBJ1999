@@ -1,10 +1,11 @@
 ﻿#include <iostream>
-#include <cstdlib> // rand() 함수 사용을 위함
-#include <ctime>   // 시간 기반 시드 생성을 위함
-#include <list>    // 리스트 컨테이너 사용을 위함
-#include <mutex>   // 뮤텍스 사용을 위함
-#include <thread>  // 스레드 사용을 위함
-#include <chrono>  // 시간 기반 대기를 위함
+#include <cstdlib> // for rand()
+#include <ctime>   // for time()
+#include <list>
+#include <mutex>
+#include <thread>
+#include <chrono>
+#include <sstream>
 
 using namespace std;
 
@@ -12,9 +13,10 @@ using namespace std;
 struct Process
 {
     int pid;
-    bool isForeground; // foreground인 경우 true, background인 경우 false
+    bool isForeground; // true면 foreground, false면 background
     int remainingTime; // 백그라운드 프로세스의 남은 시간
-    Process(int id, bool fg = true) : pid(id), isForeground(fg), remainingTime(0) { }
+    bool isPromoted;   // 프로모션된 프로세스인 경우 true
+    Process(int id, bool fg = true) : pid(id), isForeground(fg), remainingTime(0), isPromoted(false) { }
 };
 
 // 스택 노드 구조체
@@ -25,71 +27,74 @@ struct StackNode
     StackNode() : next(nullptr) { }
 };
 
-// 동적 큐 클래스
+// 대기 큐 구조체
+struct WaitQueue
+{
+    list<Process> processList;
+    mutex mtx;
+};
+
 class DynamicQueue
 {
     private:
     StackNode* top;    // 스택의 맨 위 (foreground 프로세스)
     StackNode* bottom; // 스택의 맨 아래 (background 프로세스)
-    mutex mtx;         // 스레드 안전을 위한 뮤텍스
+    mutex mtx;         // 스레드 안전성을 위한 뮤텍스
+    WaitQueue wq;      // 대기 큐
 
     public:
     DynamicQueue() : top(nullptr), bottom(nullptr) { }
 
-    // 프로세스 enqueue 메서드
+    // 프로세스 enqueue
     void enqueue(Process p)
     {
         lock_guard < mutex > lock (mtx) ;
-        StackNode* targetNode = p.isForeground ? top : bottom;
-        targetNode = ensureNode(targetNode);
-        targetNode->processList.push_back(p);
+        if (p.isForeground)
+        {
+            top = ensureNode(top);
+            top->processList.push_back(p);
+        }
+        else
+        {
+            bottom = ensureNode(bottom);
+            bottom->processList.push_back(p);
+        }
     }
 
-    // 프로세스 dequeue 메서드
+    // 프로세스 dequeue
     Process dequeue()
     {
         lock_guard < mutex > lock (mtx) ;
-        StackNode* targetNode = top;
         if (top && !top->processList.empty())
         {
             Process p = top->processList.front();
             top->processList.pop_front();
             if (top->processList.empty())
             {
+                StackNode* oldTop = top;
                 top = top->next;
-                delete targetNode;
+                delete oldTop;
             }
             return p;
         }
         return Process(-1, true); // 큐가 비어있는 경우 더미 프로세스 반환
     }
 
-    // 프로세스 프로모션 메서드
+    // 프로세스 프로모션
     void promote()
     {
         lock_guard < mutex > lock (mtx) ;
-        if (top && top->next)
+        if (bottom && !bottom->processList.empty())
         {
-            StackNode* promotedNode = top;
-            top = top->next;
-            promotedNode->next = nullptr;
-            if (promotedNode->processList.empty())
-            {
-                delete promotedNode;
-            }
-            else
-            {
-                StackNode* targetNode = top;
-                while (targetNode->next)
-                {
-                    targetNode = targetNode->next;
-                }
-                targetNode->next = promotedNode;
-            }
+            Process promotedProcess = bottom->processList.front();
+            bottom->processList.pop_front();
+            promotedProcess.isPromoted = true;
+            top = ensureNode(top);
+            top->processList.push_back(promotedProcess);
         }
     }
 
-    // 프로세스 분할 및 병합 메서드
+    // 프로세스 분할 및 병합
     void split_n_merge(int threshold)
     {
         lock_guard < mutex > lock (mtx) ;
@@ -100,8 +105,8 @@ class DynamicQueue
             {
                 StackNode* newNode = new StackNode();
                 auto it = targetNode->processList.begin();
-                advance(it, threshold / 2);
-                newNode->processList.splice(newNode->processList.begin(), targetNode->processList, targetNode->processList.begin(), it);
+                advance(it, targetNode->processList.size() / 2);
+                newNode->processList.splice(newNode->processList.begin(), targetNode->processList, it, targetNode->processList.end());
                 newNode->next = targetNode->next;
                 targetNode->next = newNode;
             }
@@ -109,50 +114,78 @@ class DynamicQueue
         }
     }
 
-    // 프로세스 유형(foreground/background)에 대한 노드의 존재 여부 확인 메서드
+    // 프로세스 유형(foreground/background)에 대한 노드의 존재 여부 확인
     StackNode* ensureNode(StackNode* node)
     {
         if (!node)
         {
             node = new StackNode();
-            if (node->processList.empty())
-            {
-                if (node->next == nullptr)
-                {
-                    if (node->processList.empty())
-                        top = bottom = node;
-                }
-                else if (node->processList.empty())
-                    top = node;
-            }
-            else
-            {
-                if (node->next == nullptr)
-                {
-                    if (node->processList.empty())
-                        bottom = node;
-                }
-            }
+            if (!top) top = node;
+            if (!bottom) bottom = node;
         }
         return node;
     }
 
-    // 큐 내용 출력 메서드
+    // 큐의 내용 출력
     void printQueue()
     {
         lock_guard < mutex > lock (mtx) ;
-        cout << "Foreground Processes:" << endl;
+        stringstream ss;
+
+        // Running 상태 출력
+        ss << "Running: ";
+        if (top && !top->processList.empty())
+        {
+            auto process = top->processList.front();
+            ss << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+        }
+        else
+        {
+            ss << "[]";
+        }
+        ss << "\n--------------------------\n";
+
+        // Dynamic Queue 출력
+        ss << "DQ: ";
         StackNode* current = top;
         while (current)
         {
             for (const auto&process : current->processList) {
-                cout << process.pid << (process.isForeground ? " (F)" : " (B)");
-                if (!process.isForeground)
-                    cout << " - 남은 시간: " << process.remainingTime;
-                cout << endl;
+                ss << "[" << process.pid << (process.isForeground ? "F" : "B");
+                if (process.isPromoted)
+                {
+                    ss << "*";
+                }
+                ss << "] ";
+            }
+            if (current->next)
+            {
+                ss << "-> ";
+            }
+            else
+            {
+                ss << "(bottom/top)";
             }
             current = current->next;
         }
+        ss << "\n--------------------------\n";
+
+        // Wait Queue 출력
+        ss << "WQ: ";
+        lock_guard<mutex> wqLock(wq.mtx);
+        for (const auto&process : wq.processList) {
+            ss << "[" << process.pid << (process.isForeground ? "F" : "B") << ":" << process.remainingTime << "] ";
+        }
+        ss << "\n--------------------------\n";
+
+        cout << ss.str();
+    }
+
+    // 대기 큐에 프로세스 추가
+    void addToWaitQueue(Process p)
+    {
+        lock_guard < mutex > lock (wq.mtx) ;
+        wq.processList.push_back(p);
     }
 };
 
@@ -162,13 +195,13 @@ void simulateProcesses(DynamicQueue& queue)
     srand(time(nullptr));
     int count = 0;
     while (count < 20)
-    { // 20번의 반복으로
+    { // 20번의 반복으로 시뮬레이션
         // 프로세스 생성 시뮬레이션
         int pid = rand() % 100; // 랜덤 프로세스 ID 생성
         bool isForeground = rand() % 2 == 0; // 프로세스가 foreground 또는 background인지 랜덤으로 결정
         Process p(pid, isForeground);
         if (!isForeground)
-            p.remainingTime = rand() % 10 + 1; // 백그라운드 프로세스의 남은 시간 랜덤 생성
+            p.remainingTime = rand() % 10 + 1; // 백그라운드 프로세스의 잔여 시간 랜덤 생성
 
         // 프로세스 enqueue
         queue.enqueue(p);
@@ -192,7 +225,9 @@ int main()
     DynamicQueue queue;
     simulateProcesses(queue);
     return 0;
-}//2-1
+}
+
+//2-1
 #include <iostream>
 #include <cstdlib> // for exit()
 #include <cstring> // for strtok(), strtok_r()
@@ -442,136 +477,286 @@ int main()
 }//2-2
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <thread>
 #include <chrono>
 #include <mutex>
-#include <sstream>
+#include <condition_variable>
+#include <map>
+#include <queue>
+#include <functional>
+#include <atomic>
 #include <algorithm>
+#include <numeric>
+#include <climits>
 
-std::mutex mu;
+using namespace std;
 
-void executeCommand(const std::string& command, int period, int duration, int n, int m);
+mutex cout_mutex;
+condition_variable cv;
+atomic<bool> done(false);
+queue<string> commandQueue;
 
-int gcd(int a, int b);
-int countPrimes(int x);
-long long sumUpTo(int x, int m);
-void dummy();
-
-int main()
+void echo(const string& str)
 {
-    std::ifstream file("commands.txt");
-    if (!file)
-    {
-        std::cerr << "파일을 열 수 없습니다." << std::endl;
-        return 1; // 파일 오픈 실패
-    }
-
-    std::string line;
-    std::vector<std::thread> threads;
-
-    while (getline(file, line))
-    {
-        std::istringstream iss(line);
-        std::string cmd;
-        int period = 0, duration = 100, n = 1, m = 1;
-
-        std::string token;
-        while (iss >> token)
-        {
-            if (token == "-p" && iss >> token) period = std::stoi(token);
-            else if (token == "-d" && iss >> token) duration = std::stoi(token);
-            else if (token == "-n" && iss >> token) n = std::stoi(token);
-            else if (token == "-m" && iss >> token) m = std::stoi(token);
-            else cmd += token + " ";
-        }
-
-        if (!cmd.empty()) cmd.pop_back(); // Remove trailing space
-        threads.emplace_back(executeCommand, cmd, period, duration, n, m);
-    }
-
-    for (auto & t : threads) {
-        if (t.joinable()) t.join();
-    }
-
-    return 0;
+    lock_guard < mutex > lock (cout_mutex) ;
+    cout << str << endl;
 }
 
-void executeCommand(const std::string& command, int period, int duration, int n, int m)
+void dummy() { }
+
+int gcd(int x, int y)
 {
-    auto start = std::chrono::steady_clock::now();
-    do
+    while (y != 0)
     {
-        for (int i = 0; i < n; ++i)
+        int temp = y;
+        y = x % y;
+        x = temp;
+    }
+    lock_guard < mutex > lock (cout_mutex) ;
+    cout << x << endl;
+    return x;
+}
+
+int count_primes(int x)
+{
+    vector<bool> sieve(x +1, true);
+    sieve[0] = sieve[1] = false;
+    for (int i = 2; i * i <= x; ++i)
+    {
+        if (sieve[i])
         {
+            for (int j = i * i; j <= x; j += i)
             {
-                std::unique_lock < std::mutex > lock (mu) ;
-                if (command.substr(0, 5) == "echo ")
-                {
-                    std::cout << command.substr(5) << std::endl; // Print the string after "echo "
-                }
-                else if (command.substr(0, 4) == "gcd ")
-                {
-                    std::stringstream ss(command.substr(4));
-        int x, y;
-        ss >> x >> y;
-        std::cout << gcd(x, y) << std::endl;
-    }
-                else if (command.substr(0, 6) == "prime ")
-    {
-        int x = std::stoi(command.substr(6));
-        std::cout << countPrimes(x) << std::endl;
-    }
-    else if (command.substr(0, 4) == "sum ")
-    {
-        int x = std::stoi(command.substr(4));
-        std::cout << sumUpTo(x, m) << std::endl;
-    }
-    else if (command == "dummy")
-    {
-        dummy();
-    }
-}
-if (period > 0)
-{
-    std::this_thread::sleep_for(std::chrono::seconds(period));
-}
-        }
-    } while (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < duration) ;
-}
-
-int gcd(int a, int b)
-{
-    return b == 0 ? a : gcd(b, a % b);
-}
-
-int countPrimes(int x)
-{
-    std::vector<bool> prime(x +1, true);
-    prime[0] = prime[1] = false;
-    for (int p = 2; p * p <= x; ++p)
-    {
-        if (prime[p])
-        {
-            for (int i = p * p; i <= x; i += p)
-            {
-                prime[i] = false;
+                sieve[j] = false;
             }
         }
     }
-    return std::count(prime.begin(), prime.end(), true);
+    int prime_count = count(sieve.begin(), sieve.end(), true);
+    lock_guard < mutex > lock (cout_mutex) ;
+    cout << prime_count << endl;
+    return prime_count;
 }
 
-long long sumUpTo(int x, int m) {
-    long long sum = 0;
-for (int i = 1; i <= x; ++i)
+int sum_upto(int x)
 {
-    sum += i;
-}
-return sum * m;
+    int result = (x * (x + 1) / 2) % 1000000;
+    lock_guard < mutex > lock (cout_mutex) ;
+    cout << result << endl;
+    return result;
 }
 
-void dummy()
+int sum_upto_parallel(int x, int parts)
 {
-    // 아무 일도 하지 않음
-}//2-3
+    auto partial_sum = [](int start, int end)-> int {
+        return (end * (end + 1) / 2 - (start - 1) * start / 2) % 1000000;
+    };
+
+    vector<thread> threads;
+    vector<int> results(parts);
+    int step = x / parts;
+
+    for (int i = 0; i < parts; ++i)
+    {
+        int start = i * step + 1;
+        int end = (i == parts - 1) ? x : (i + 1) * step;
+        threads.emplace_back([&, i, start, end] {
+            results[i] = partial_sum(start, end);
+        });
+}
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    int result = accumulate(results.begin(), results.end(), 0) % 1000000;
+lock_guard < mutex > lock (cout_mutex) ;
+cout << result << endl;
+return result;
+}
+
+void handle_command(const string& command)
+{
+    stringstream ss(command);
+    string cmd;
+    vector<string> parts;
+    while (ss >> cmd)
+    {
+        parts.push_back(cmd);
+    }
+
+    map<string, int> options = { { "-n", 1 }, { "-d", INT_MAX }, { "-p", 0 }, { "-m", 1 } };
+    size_t i = 1;
+
+    while (i < parts.size())
+    {
+        if (options.count(parts[i]))
+        {
+            options[parts[i]] = stoi(parts[i + 1]);
+            i += 2;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    auto execute = [&]() {
+        if (parts[0] == "echo")
+        {
+            for (int j = 0; j < options["-n"]; ++j)
+            {
+                if (options["-p"])
+                {
+                    while (true)
+                    {
+                        echo(parts[1]);
+                        this_thread::sleep_for(chrono::seconds(options["-p"]));
+                    }
+                }
+                else
+                {
+                    echo(parts[1]);
+                }
+            }
+        }
+        else if (parts[0] == "dummy")
+        {
+            for (int j = 0; j < options["-n"]; ++j)
+            {
+                dummy();
+            }
+        }
+        else if (parts[0] == "gcd")
+        {
+            int x = stoi(parts[1]);
+            int y = stoi(parts[2]);
+            for (int j = 0; j < options["-n"]; ++j)
+            {
+                gcd(x, y);
+            }
+        }
+        else if (parts[0] == "prime")
+        {
+            int x = stoi(parts[1]);
+            for (int j = 0; j < options["-n"]; ++j)
+            {
+                count_primes(x);
+            }
+        }
+        else if (parts[0] == "sum")
+        {
+            int x = stoi(parts[1]);
+            for (int j = 0; j < options["-n"]; ++j)
+            {
+                sum_upto_parallel(x, options["-m"]);
+            }
+        }
+    };
+
+    if (options["-p"])
+    {
+        auto periodic_execution = [&]() {
+            auto start_time = chrono::system_clock::now();
+            while (chrono::duration_cast<chrono::seconds>(chrono::system_clock::now() - start_time).count() < options["-d"])
+            {
+                execute();
+                this_thread::sleep_for(chrono::seconds(options["-p"]));
+            }
+        };
+        thread(periodic_execution).detach();
+    }
+    else
+    {
+        execute();
+    }
+}
+
+void process_commands(const vector<string>& commands, int interval)
+{
+    for (const auto&command : commands) {
+        if (done) break;
+
+stringstream ss(command);
+string segment;
+vector<string> fg_cmds;
+vector<string> bg_cmds;
+
+while (getline(ss, segment, ';'))
+{
+    if (segment.find("&") == 0)
+    {
+        bg_cmds.push_back(segment.substr(1));
+    }
+    else
+    {
+        fg_cmds.push_back(segment);
+    }
+}
+
+for (const auto&cmd : fg_cmds) {
+            handle_command(cmd);
+        }
+
+        vector<thread> bg_threads;
+for (const auto&cmd : bg_cmds) {
+            bg_threads.emplace_back(handle_command, cmd);
+        }
+
+        for (auto & t : bg_threads)
+{
+    if (t.joinable())
+    {
+        t.join();
+    }
+}
+
+this_thread::sleep_for(chrono::seconds(interval));
+    }
+
+    lock_guard < mutex > lock (cout_mutex) ;
+cout << "All commands processed. Exiting..." << endl;
+}
+
+void monitor()
+{
+    while (!done)
+    {
+        unique_lock < mutex > lock (cout_mutex) ;
+        cv.wait_for(lock, chrono::seconds(5), [] { return done.load(); });
+        if (!done)
+        {
+            cout << "Monitoring running processes..." << endl;
+        }
+    }
+}
+
+int main()
+{
+    ifstream file("commands.txt");
+    if (!file.is_open())
+    {
+        cerr << "Failed to open commands.txt" << endl;
+        return 1;
+    }
+
+    string line;
+    vector<string> commands;
+    while (getline(file, line))
+    {
+        commands.push_back(line);
+    }
+    file.close();
+
+    thread shell_thread(process_commands, commands, 1);
+    thread monitor_thread(monitor);
+
+    shell_thread.join();
+    done = true;
+    cv.notify_all();
+    monitor_thread.join();
+
+    return 0;
+}
+//2-3
