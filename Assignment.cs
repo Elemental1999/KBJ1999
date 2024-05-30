@@ -609,19 +609,21 @@ int main()
 
 using namespace std;
 
-mutex cout_mutex;
-condition_variable cv;
-atomic<bool> done(false);
-queue<string> commandQueue;
+mutex cout_mutex; // 출력을 동기화하기 위한 뮤텍스
+condition_variable cv; // 조건 변수
+atomic<bool> done(false); // 프로그램 종료 여부를 나타내는 원자적 변수
 
+// 문자열 출력 함수
 void echo(const string& str)
 {
     lock_guard < mutex > lock (cout_mutex) ;
     cout << str << endl;
 }
 
+// 더미 함수
 void dummy() { }
 
+// 최대공약수 계산 함수
 int gcd(int x, int y)
 {
     while (y != 0)
@@ -635,6 +637,7 @@ int gcd(int x, int y)
     return x;
 }
 
+// 소수 개수 세는 함수
 int count_primes(int x)
 {
     vector<bool> sieve(x +1, true);
@@ -655,6 +658,7 @@ int count_primes(int x)
     return prime_count;
 }
 
+// 1부터 x까지의 합 계산 함수
 int sum_upto(int x)
 {
     int result = (x * (x + 1) / 2) % 1000000;
@@ -663,6 +667,7 @@ int sum_upto(int x)
     return result;
 }
 
+// 병렬로 1부터 x까지의 합 계산 함수
 int sum_upto_parallel(int x, int parts)
 {
     auto partial_sum = [](int start, int end)-> int {
@@ -682,7 +687,8 @@ int sum_upto_parallel(int x, int parts)
         });
 }
 
-    for (auto& t : threads) {
+    for (auto& t : threads)
+    {
         t.join();
     }
 
@@ -692,6 +698,7 @@ cout << result << endl;
 return result;
 }
 
+// 사용자 명령 처리 함수
 void handle_command(const string& command)
 {
     stringstream ss(command);
@@ -705,6 +712,7 @@ void handle_command(const string& command)
     map<string, int> options = { { "-n", 1 }, { "-d", INT_MAX }, { "-p", 0 }, { "-m", 1 } };
     size_t i = 1;
 
+    // 옵션 파싱
     while (i < parts.size())
     {
         if (options.count(parts[i]))
@@ -719,13 +727,13 @@ void handle_command(const string& command)
     }
 
     auto execute = [&]() {
-        if (parts[0] == "echo")
+        if (parts[0] == "echo") // "echo" 명령 처리
         {
             for (int j = 0; j < options["-n"]; ++j)
             {
                 if (options["-p"])
                 {
-                    while (true)
+                    while (!done)
                     {
                         echo(parts[1]);
                         this_thread::sleep_for(chrono::seconds(options["-p"]));
@@ -737,14 +745,14 @@ void handle_command(const string& command)
                 }
             }
         }
-        else if (parts[0] == "dummy")
+        else if (parts[0] == "dummy") // "dummy" 명령 처리
         {
             for (int j = 0; j < options["-n"]; ++j)
             {
                 dummy();
             }
         }
-        else if (parts[0] == "gcd")
+        else if (parts[0] == "gcd") // "gcd" 명령 처리
         {
             int x = stoi(parts[1]);
             int y = stoi(parts[2]);
@@ -753,7 +761,7 @@ void handle_command(const string& command)
                 gcd(x, y);
             }
         }
-        else if (parts[0] == "prime")
+        else if (parts[0] == "prime") // "prime" 명령 처리
         {
             int x = stoi(parts[1]);
             for (int j = 0; j < options["-n"]; ++j)
@@ -761,7 +769,7 @@ void handle_command(const string& command)
                 count_primes(x);
             }
         }
-        else if (parts[0] == "sum")
+        else if (parts[0] == "sum") // "sum" 명령 처리
         {
             int x = stoi(parts[1]);
             for (int j = 0; j < options["-n"]; ++j)
@@ -771,7 +779,7 @@ void handle_command(const string& command)
         }
     };
 
-    if (options["-p"])
+    if (options["-p"]) // 주기적 실행인 경우
     {
         auto periodic_execution = [&]() {
             auto start_time = chrono::system_clock::now();
@@ -783,15 +791,17 @@ void handle_command(const string& command)
         };
         thread(periodic_execution).detach();
     }
-    else
+    else // 주기적 실행이 아닌 경우
     {
         execute();
     }
 }
 
+// 명령 처리 함수
 void process_commands(const vector<string>& commands, int interval)
 {
-    for (const auto&command : commands) {
+    for (const auto&command : commands)
+    {
         if (done) break;
 
 stringstream ss(command);
@@ -799,6 +809,7 @@ string segment;
 vector<string> fg_cmds;
 vector<string> bg_cmds;
 
+// 명령 분할
 while (getline(ss, segment, ';'))
 {
     if (segment.find("&") == 0)
@@ -811,15 +822,20 @@ while (getline(ss, segment, ';'))
     }
 }
 
-for (const auto&cmd : fg_cmds) {
+// 포그라운드 명령 처리
+for (const auto&cmd : fg_cmds)
+        {
             handle_command(cmd);
         }
 
         vector<thread> bg_threads;
-for (const auto&cmd : bg_cmds) {
+// 백그라운드 명령 처리
+for (const auto&cmd : bg_cmds)
+        {
             bg_threads.emplace_back(handle_command, cmd);
         }
 
+        // 백그라운드 스레드 조인
         for (auto & t : bg_threads)
 {
     if (t.joinable())
@@ -828,13 +844,16 @@ for (const auto&cmd : bg_cmds) {
     }
 }
 
+// 일정 시간 대기
 this_thread::sleep_for(chrono::seconds(interval));
     }
 
+    // 프로그램 종료 메시지 출력
     lock_guard < mutex > lock (cout_mutex) ;
 cout << "All commands processed. Exiting..." << endl;
 }
 
+// 프로세스 모니터링 함수
 void monitor()
 {
     while (!done)
@@ -848,6 +867,7 @@ void monitor()
     }
 }
 
+// 메인 함수
 int main()
 {
     ifstream file("commands.txt");
@@ -857,6 +877,7 @@ int main()
         return 1;
     }
 
+    // 파일에서 명령 읽기
     string line;
     vector<string> commands;
     while (getline(file, line))
@@ -865,13 +886,19 @@ int main()
     }
     file.close();
 
+    // 쉘 스레드 시작
     thread shell_thread(process_commands, commands, 1);
+    // 모니터링 스레드 시작
     thread monitor_thread(monitor);
 
+    // 쉘 스레드 조인
     shell_thread.join();
+    // 프로그램 종료 상태 변경
     done = true;
+    // 모니터링 스레드 조인
     cv.notify_all();
     monitor_thread.join();
 
     return 0;
-}//2-3
+}
+//2-3
