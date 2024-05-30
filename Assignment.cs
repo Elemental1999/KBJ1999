@@ -147,7 +147,7 @@ class DynamicQueue
 
         // Dynamic Queue 출력
         ss << "DQ: ";
-        StackNode* current = top;
+        StackNode* current = bottom;
         while (current)
         {
             for (const auto&process : current->processList) {
@@ -158,14 +158,15 @@ class DynamicQueue
                 }
                 ss << "] ";
             }
-            if (current->next)
+            if (current == top)
             {
-                ss << "-> ";
+                ss << "(top)";
             }
-            else
+            if (current == bottom)
             {
-                ss << "(bottom/top)";
+                ss << "(bottom)";
             }
+            ss << "-> ";
             current = current->next;
         }
         ss << "\n--------------------------\n";
@@ -225,9 +226,7 @@ int main()
     DynamicQueue queue;
     simulateProcesses(queue);
     return 0;
-}
-
-//2-1
+}//2-1
 #include <iostream>
 #include <cstdlib> // for exit()
 #include <cstring> // for strtok(), strtok_r()
@@ -813,5 +812,4 @@ int main()
     monitor_thread.join();
 
     return 0;
-}
-//2-3
+}//2-3
