@@ -373,22 +373,76 @@ class DynamicQueue
     void printQueue()
     {
         lock_guard < mutex > lock (mtx) ;
-        cout << "DQ: ";
+
+        // Running 프로세스 출력
+        cout << "Running: ";
         StackNode* current = bottom;
         while (current)
         {
-            for (const auto&process : current->processList) {
+            for (const auto&process : current->processList)
+            {
+                cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+            }
+            cout << "-";
+            current = current->next;
+        }
+        cout << endl;
+
+        // DQ 출력
+        cout << "DQ: ";
+        current = bottom;
+        while (current)
+        {
+            for (const auto&process : current->processList)
+            {
                 cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
             }
             if (current == top)
             {
-                cout << " (top)";
-            }
-            if (current == bottom)
-            {
-                cout << " (bottom)";
+                cout << " (bottom/top)";
             }
             cout << "-";
+            current = current->next;
+        }
+        cout << endl;
+
+        // P 출력
+        cout << " P => ";
+        current = bottom;
+        while (current)
+        {
+            for (const auto&process : current->processList)
+            {
+                if (!process.isForeground)
+                {
+                    cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+                    if (process.remainingTime > 0)
+                    {
+                        cout << " *" << process.remainingTime << " ";
+                    }
+                    else
+                    {
+                        cout << " ";
+                    }
+                }
+            }
+            current = current->next;
+        }
+        cout << endl;
+
+        // WQ 출력
+        cout << "WQ: ";
+        current = bottom;
+        while (current)
+        {
+            for (const auto&process : current->processList)
+            {
+                if (!process.isForeground)
+                {
+                    cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+                    cout << ":" << process.remainingTime << " ";
+                }
+            }
             current = current->next;
         }
         cout << endl;
@@ -425,6 +479,7 @@ void simulateProcesses(DynamicQueue& queue)
         count++;
     }
 }
+
 // Parse 함수: 명령을 입력 받아 토큰으로 파싱하여 반환
 char** parse(const char* command)
 {
