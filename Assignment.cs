@@ -41,9 +41,10 @@ class DynamicQueue
     StackNode* bottom; // 스택의 맨 아래 (background 프로세스)
     mutex mtx;         // 스레드 안전성을 위한 뮤텍스
     WaitQueue wq;      // 대기 큐
+    bool topFirst;     // top과 bottom의 출력 순서를 결정하기 위한 플래그
 
     public:
-    DynamicQueue() : top(nullptr), bottom(nullptr) { }
+    DynamicQueue() : top(nullptr), bottom(nullptr), topFirst(true) { }
 
     // 프로세스 enqueue
     void enqueue(Process p)
@@ -67,8 +68,8 @@ class DynamicQueue
         lock_guard < mutex > lock (mtx) ;
         if (top && !top->processList.empty())
         {
-            Process p = top->processList.front();
-            top->processList.pop_front();
+            Process p = top->processList.back();
+            top->processList.pop_back();
             if (top->processList.empty())
             {
                 StackNode* oldTop = top;
@@ -136,7 +137,7 @@ class DynamicQueue
         ss << "Running: ";
         if (top && !top->processList.empty())
         {
-            auto process = top->processList.front();
+            auto process = top->processList.back();
             ss << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
         }
         else
@@ -146,30 +147,18 @@ class DynamicQueue
         ss << "\n--------------------------\n";
 
         // Dynamic Queue 출력
-        ss << "DQ: ";
-        StackNode* current = bottom;
-        while (current)
+        ss << "DQ:\n";
+        if (topFirst)
         {
-            for (const auto&process : current->processList) {
-                ss << "[" << process.pid << (process.isForeground ? "F" : "B");
-                if (process.isPromoted)
-                {
-                    ss << "*";
-                }
-                ss << "] ";
-            }
-            if (current == top)
-            {
-                ss << "(top)";
-            }
-            if (current == bottom)
-            {
-                ss << "(bottom)";
-            }
-            ss << "-> ";
-            current = current->next;
+            ss << printNode(top, "(top)") << printNode(bottom, "(bottom)");
         }
-        ss << "\n--------------------------\n";
+        else
+        {
+            ss << printNode(bottom, "(bottom)") << printNode(top, "(top)");
+        }
+        topFirst = !topFirst;
+
+        ss << "--------------------------\n";
 
         // Wait Queue 출력
         ss << "WQ: ";
@@ -182,12 +171,78 @@ class DynamicQueue
         cout << ss.str();
     }
 
+    // 노드의 내용을 출력하는 헬퍼 함수
+    string printNode(StackNode* node, const string& label) {
+        stringstream ss;
+        if (node) {
+            if (label != "") {
+                ss << label << "\n";
+            }
+bool printedPromoted = false;
+            for (const auto& process : node->processList) {
+                if (process.isPromoted && !printedPromoted) {
+                    ss << "P => ";
+                    printedPromoted = true;
+                }
+                ss << "[" << process.pid << (process.isForeground ? "F" : "B");
+if (process.isPromoted)
+{
+    ss << "*";
+}
+ss << "] ";
+            }
+            ss << "\n";
+        }
+        return ss.str();
+    }
+
     // 대기 큐에 프로세스 추가
     void addToWaitQueue(Process p)
+{
+    lock_guard < mutex > lock (wq.mtx) ;
+    wq.processList.push_back(p);
+}
+
+// 대기 큐를 다음 큐로 처리
+void processWaitQueue()
+{
+    lock_guard < mutex > lock (wq.mtx) ;
+    for (auto it = wq.processList.begin(); it != wq.processList.end();)
     {
-        lock_guard < mutex > lock (wq.mtx) ;
-        wq.processList.push_back(p);
+        it->remainingTime--;
+        if (it->remainingTime <= 0)
+        {
+            enqueue(*it);
+            it = wq.processList.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
     }
+}
+
+// 백그라운드 프로세스 대기 큐로 이동
+void moveToWaitQueue()
+{
+    lock_guard < mutex > lock (mtx) ;
+    if (bottom && !bottom->processList.empty())
+    {
+        auto it = bottom->processList.begin();
+        while (it != bottom->processList.end())
+        {
+            if (!it->isForeground && it->remainingTime > 0)
+            {
+                addToWaitQueue(*it);
+                it = bottom->processList.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+}
 };
 
 // 프로세스 시뮬레이션 함수
@@ -207,9 +262,15 @@ void simulateProcesses(DynamicQueue& queue)
         // 프로세스 enqueue
         queue.enqueue(p);
 
+        // 대기 큐 처리
+        queue.processWaitQueue();
+
         // 프로세스 프로모션 및 분할/병합
         queue.promote();
         queue.split_n_merge(5); // 데모를 위해 임계값을 5로 설정
+
+        // 백그라운드 프로세스를 대기 큐로 이동
+        queue.moveToWaitQueue();
 
         // 큐 출력
         queue.printQueue();
