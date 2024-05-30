@@ -226,7 +226,8 @@ int main()
     DynamicQueue queue;
     simulateProcesses(queue);
     return 0;
-}//2-1
+}
+//2-1
 #include <iostream>
 #include <cstdlib> // for exit()
 #include <cstring> // for strtok(), strtok_r()
