@@ -288,24 +288,41 @@ class DynamicQueue
     void enqueue(Process p)
     {
         lock_guard < mutex > lock (mtx) ;
-        StackNode* targetNode = p.isForeground ? top : bottom;
-        targetNode = ensureNode(targetNode);
-        targetNode->processList.push_back(p);
+        StackNode** targetNode = p.isForeground ? &top : &bottom;
+
+        if (*targetNode == nullptr)
+        {
+            *targetNode = new StackNode();
+            if (p.isForeground && bottom == nullptr)
+            {
+                bottom = top;
+            }
+            else if (!p.isForeground && top == nullptr)
+            {
+                top = bottom;
+            }
+        }
+
+        (*targetNode)->processList.push_back(p);
     }
 
     // 프로세스를 큐에서 제거
     Process dequeue()
     {
         lock_guard < mutex > lock (mtx) ;
-        StackNode* targetNode = top;
         if (top && !top->processList.empty())
         {
             Process p = top->processList.front();
             top->processList.pop_front();
             if (top->processList.empty())
             {
+                StackNode* temp = top;
                 top = top->next;
-                delete targetNode;
+                if (top == nullptr)
+                {
+                    bottom = nullptr;
+                }
+                delete temp;
             }
             return p;
         }
@@ -357,34 +374,6 @@ class DynamicQueue
         }
     }
 
-    // 주어진 프로세스 유형 (포그라운드/백그라운드)에 대한 노드의 존재 여부 확인
-    StackNode* ensureNode(StackNode* node)
-    {
-        if (!node)
-        {
-            node = new StackNode();
-            if (node->processList.empty())
-            {
-                if (node->next == nullptr)
-                {
-                    if (node->processList.empty())
-                        top = bottom = node;
-                }
-                else if (node->processList.empty())
-                    top = node;
-            }
-            else
-            {
-                if (node->next == nullptr)
-                {
-                    if (node->processList.empty())
-                        bottom = node;
-                }
-            }
-        }
-        return node;
-    }
-
     // 큐의 내용을 출력
     void printQueue()
     {
@@ -392,37 +381,43 @@ class DynamicQueue
 
         // Running 프로세스 출력
         cout << "Running: ";
-        StackNode* current = bottom;
-        while (current)
+        if (bottom && !bottom->processList.empty())
         {
-            for (const auto&process : current->processList)
+            for (const auto&process : bottom->processList)
             {
-                cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+                if (!process.isForeground)
+                {
+                    cout << "[" << process.pid << "B]";
+                    break;
+                }
             }
-            cout << "-";
-            current = current->next;
         }
         cout << endl;
+        cout << "--------------------------" << endl;
 
         // DQ 출력
         cout << "DQ: ";
-        current = bottom;
+        StackNode* current = bottom;
+        bool isBottom = true;
         while (current)
         {
             for (const auto&process : current->processList)
             {
                 cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+                if (isBottom)
+                {
+                    cout << " (bottom)";
+                    isBottom = false;
+                }
             }
-            if (current == top)
-            {
-                cout << " (bottom/top)";
-            }
-            cout << "-";
             current = current->next;
+        }
+        if (top == bottom)
+        {
+            cout << " (top)";
         }
         cout << endl;
 
-        // P 출력
         cout << " P => ";
         current = bottom;
         while (current)
@@ -431,20 +426,19 @@ class DynamicQueue
             {
                 if (!process.isForeground)
                 {
-                    cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
+                    cout << "[" << process.pid << "B]";
                     if (process.remainingTime > 0)
                     {
-                        cout << " *" << process.remainingTime << " ";
+                        cout << " *" << process.remainingTime;
                     }
-                    else
-                    {
-                        cout << " ";
-                    }
+                    cout << " ";
                 }
             }
             current = current->next;
         }
         cout << endl;
+
+        cout << "--------------------------" << endl;
 
         // WQ 출력
         cout << "WQ: ";
@@ -455,13 +449,12 @@ class DynamicQueue
             {
                 if (!process.isForeground)
                 {
-                    cout << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
-                    cout << ":" << process.remainingTime << " ";
+                    cout << "[" << process.pid << "B:" << process.remainingTime << "]";
                 }
             }
             current = current->next;
         }
-        cout << endl;
+        cout << endl << endl; // WQ와 Running 사이에 한 칸 띄우기
     }
 };
 
@@ -496,56 +489,16 @@ void simulateProcesses(DynamicQueue& queue)
     }
 }
 
-// Parse 함수: 명령을 입력 받아 토큰으로 파싱하여 반환
-char** parse(const char* command)
-{
-    char** args = new char*[64]; // 최대 64개의 토큰을 저장할 수 있는 배열
-    char* temp = strdup(command); // 입력 명령을 복제하여 임시로 저장
-
-    int i = 0;
-    char* token = strtok(temp, " "); // 공백을 기준으로 첫 번째 토큰 추출
-    while (token != nullptr)
-    {
-        args[i++] = token; // 추출한 토큰을 배열에 저장
-        token = strtok(nullptr, " "); // 다음 토큰 추출
-    }
-    args[i] = nullptr; // 배열의 끝을 나타내는 nullptr 추가
-
-    delete[] temp; // 복제한 문자열 메모리 해제
-    return args;
-}
-
-// Exec 함수: 명령어를 실행
-void exec(char** args)
-{
-    pid_t pid = fork(); // 새로운 프로세스 생성
-    if (pid == -1)
-    {
-        perror("fork failed");
-        exit(EXIT_FAILURE);
-    }
-    else if (pid == 0)
-    {
-        // 자식 프로세스일 경우
-        if (execvp(args[0], args) == -1)
-        {
-            perror("execvp failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-    else
-    {
-        // 부모 프로세스일 경우
-        wait(nullptr); // 자식 프로세스의 종료를 기다림
-    }
-}
-
 int main()
 {
     DynamicQueue queue;
+    // 초기 상태로 0F와 1B 프로세스 추가
+    queue.enqueue(Process(0, true));  // shell 프로세스
+    queue.enqueue(Process(1, false)); // monitor 프로세스
     simulateProcesses(queue);
     return 0;
-}//2-2
+}
+//2-2
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -568,11 +521,17 @@ mutex cout_mutex; // 출력을 동기화하기 위한 뮤텍스
 condition_variable cv; // 조건 변수
 atomic<bool> done(false); // 프로그램 종료 여부를 나타내는 원자적 변수
 
-// 문자열 출력 함수
-void echo(const string& str)
+// 안전하게 출력하는 함수
+void safe_print(const string& str)
 {
     lock_guard < mutex > lock (cout_mutex) ;
     cout << str << endl;
+}
+
+// 문자열 출력 함수
+void echo(const string& str)
+{
+    safe_print(str);
 }
 
 // 더미 함수
@@ -587,8 +546,7 @@ int gcd(int x, int y)
         y = x % y;
         x = temp;
     }
-    lock_guard < mutex > lock (cout_mutex) ;
-    cout << x << endl;
+    safe_print(to_string(x));
     return x;
 }
 
@@ -608,8 +566,7 @@ int count_primes(int x)
         }
     }
     int prime_count = count(sieve.begin(), sieve.end(), true);
-    lock_guard < mutex > lock (cout_mutex) ;
-    cout << prime_count << endl;
+    safe_print(to_string(prime_count));
     return prime_count;
 }
 
@@ -617,8 +574,7 @@ int count_primes(int x)
 int sum_upto(int x)
 {
     int result = (x * (x + 1) / 2) % 1000000;
-    lock_guard < mutex > lock (cout_mutex) ;
-    cout << result << endl;
+    safe_print(to_string(result));
     return result;
 }
 
@@ -648,8 +604,7 @@ int sum_upto_parallel(int x, int parts)
     }
 
     int result = accumulate(results.begin(), results.end(), 0) % 1000000;
-lock_guard < mutex > lock (cout_mutex) ;
-cout << result << endl;
+safe_print(to_string(result));
 return result;
 }
 
@@ -686,17 +641,10 @@ void handle_command(const string& command)
         {
             for (int j = 0; j < options["-n"]; ++j)
             {
+                echo(parts[1]);
                 if (options["-p"])
                 {
-                    while (!done)
-                    {
-                        echo(parts[1]);
-                        this_thread::sleep_for(chrono::seconds(options["-p"]));
-                    }
-                }
-                else
-                {
-                    echo(parts[1]);
+                    this_thread::sleep_for(chrono::seconds(options["-p"]));
                 }
             }
         }
@@ -736,15 +684,14 @@ void handle_command(const string& command)
 
     if (options["-p"]) // 주기적 실행인 경우
     {
-        auto periodic_execution = [&]() {
+        thread([&]() {
             auto start_time = chrono::system_clock::now();
-            while (chrono::duration_cast<chrono::seconds>(chrono::system_clock::now() - start_time).count() < options["-d"])
+            while (chrono::duration_cast<chrono::seconds>(chrono::system_clock::now() - start_time).count() < options["-d"] && !done)
             {
                 execute();
                 this_thread::sleep_for(chrono::seconds(options["-p"]));
             }
-        };
-        thread(periodic_execution).detach();
+        }).detach();
     }
     else // 주기적 실행이 아닌 경우
     {
@@ -804,8 +751,7 @@ this_thread::sleep_for(chrono::seconds(interval));
     }
 
     // 프로그램 종료 메시지 출력
-    lock_guard < mutex > lock (cout_mutex) ;
-cout << "All commands processed. Exiting..." << endl;
+    safe_print("All commands processed. Exiting...");
 }
 
 // 프로세스 모니터링 함수
