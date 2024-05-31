@@ -12,26 +12,30 @@ using namespace std;
 // 프로세스 구조체
 struct Process
 {
-    int pid;
-    bool isForeground; // true면 foreground, false면 background
-    int remainingTime; // 백그라운드 프로세스의 남은 시간
-    bool isPromoted;   // 프로모션된 프로세스인 경우 true
+    int pid;            // 프로세스 ID
+    bool isForeground;  // foreground인지 여부
+    int remainingTime;  // 백그라운드 프로세스의 남은 시간
+    bool isPromoted;    // 프로모션된 프로세스 여부
+
+    // 생성자
     Process(int id, bool fg = true) : pid(id), isForeground(fg), remainingTime(0), isPromoted(false) { }
 };
 
 // 스택 노드 구조체
 struct StackNode
 {
-    list<Process> processList;
-    StackNode* next;
+    list<Process> processList; // 프로세스 리스트
+    StackNode* next;           // 다음 노드를 가리키는 포인터
+
+    // 생성자
     StackNode() : next(nullptr) { }
 };
 
 // 대기 큐 구조체
 struct WaitQueue
 {
-    list<Process> processList;
-    mutex mtx;
+    list<Process> processList; // 프로세스 리스트
+    mutex mtx;                 // 뮤텍스
 };
 
 class DynamicQueue
@@ -39,60 +43,49 @@ class DynamicQueue
     private:
     StackNode* top;    // 스택의 맨 위 (foreground 프로세스)
     StackNode* bottom; // 스택의 맨 아래 (background 프로세스)
-    mutex mtx;         // 스레드 안전성을 위한 뮤텍스
+    mutex mtx;         // 뮤텍스
     WaitQueue wq;      // 대기 큐
     bool topFirst;     // top과 bottom의 출력 순서를 결정하기 위한 플래그
 
     public:
+    // 생성자
     DynamicQueue() : top(nullptr), bottom(nullptr), topFirst(true) { }
 
     // 프로세스 enqueue
     void enqueue(Process p)
     {
         lock_guard < mutex > lock (mtx) ;
-        if (p.isForeground)
-        {
-            top = ensureNode(top);
-            top->processList.push_back(p);
-        }
-        else
-        {
-            bottom = ensureNode(bottom);
-            bottom->processList.push_back(p);
-        }
+        StackNode * &node = p.isForeground ? top : bottom;
+        node = ensureNode(node);
+        node->processList.push_back(p);
     }
 
     // 프로세스 dequeue
     Process dequeue()
     {
         lock_guard < mutex > lock (mtx) ;
-        if (top && !top->processList.empty())
+        StackNode* node = top;
+        if (!node || node->processList.empty()) return Process(-1, true);
+        Process p = node->processList.back();
+        node->processList.pop_back();
+        if (node->processList.empty())
         {
-            Process p = top->processList.back();
-            top->processList.pop_back();
-            if (top->processList.empty())
-            {
-                StackNode* oldTop = top;
-                top = top->next;
-                delete oldTop;
-            }
-            return p;
+            top = node->next;
+            delete node;
         }
-        return Process(-1, true); // 큐가 비어있는 경우 더미 프로세스 반환
+        return p;
     }
 
     // 프로세스 프로모션
     void promote()
     {
         lock_guard < mutex > lock (mtx) ;
-        if (bottom && !bottom->processList.empty())
-        {
-            Process promotedProcess = bottom->processList.front();
-            bottom->processList.pop_front();
-            promotedProcess.isPromoted = true;
-            top = ensureNode(top);
-            top->processList.push_back(promotedProcess);
-        }
+        if (!bottom || bottom->processList.empty()) return;
+        Process promotedProcess = bottom->processList.front();
+        bottom->processList.pop_front();
+        promotedProcess.isPromoted = true;
+        top = ensureNode(top);
+        top->processList.push_back(promotedProcess);
     }
 
     // 프로세스 분할 및 병합
@@ -115,7 +108,7 @@ class DynamicQueue
         }
     }
 
-    // 프로세스 유형(foreground/background)에 대한 노드의 존재 여부 확인
+    // 노드의 유무 확인 및 생성
     StackNode* ensureNode(StackNode* node)
     {
         if (!node)
@@ -132,64 +125,29 @@ class DynamicQueue
     {
         lock_guard < mutex > lock (mtx) ;
         stringstream ss;
-
-        // Running 상태 출력
-        ss << "Running: ";
-        if (top && !top->processList.empty())
-        {
-            auto process = top->processList.back();
-            ss << "[" << process.pid << (process.isForeground ? "F" : "B") << "]";
-        }
-        else
-        {
-            ss << "[]";
-        }
-        ss << "\n--------------------------\n";
-
-        // Dynamic Queue 출력
-        ss << "DQ:\n";
-        if (topFirst)
-        {
-            ss << printNode(top, "(top)") << printNode(bottom, "(bottom)");
-        }
-        else
-        {
-            ss << printNode(bottom, "(bottom)") << printNode(top, "(top)");
-        }
-        topFirst = !topFirst;
-
-        ss << "--------------------------\n";
-
-        // Wait Queue 출력
+        ss << "Running: " << (top && !top->processList.empty() ? "[" + to_string(top->processList.back().pid) + (top->processList.back().isForeground ? "F" : "B") + "]" : "[]") << "\n--------------------------\n";
+        ss << "DQ:\n" << printNode(top, "(top)") << printNode(bottom, "(bottom)") << "--------------------------\n";
         ss << "WQ: ";
         lock_guard<mutex> wqLock(wq.mtx);
         for (const auto&process : wq.processList) {
             ss << "[" << process.pid << (process.isForeground ? "F" : "B") << ":" << process.remainingTime << "] ";
         }
         ss << "\n--------------------------\n";
-
         cout << ss.str();
     }
 
-    // 노드의 내용을 출력하는 헬퍼 함수
+    // 노드의 내용을 문자열로 반환
     string printNode(StackNode* node, const string& label) {
         stringstream ss;
         if (node) {
-            if (label != "") {
-                ss << label << "\n";
-            }
-bool printedPromoted = false;
+            if (!label.empty()) ss << label << "\n";
+            bool printedPromoted = false;
             for (const auto& process : node->processList) {
                 if (process.isPromoted && !printedPromoted) {
                     ss << "P => ";
                     printedPromoted = true;
                 }
-                ss << "[" << process.pid << (process.isForeground ? "F" : "B");
-if (process.isPromoted)
-{
-    ss << "*";
-}
-ss << "] ";
+ss << "[" << process.pid << (process.isForeground? "F" : "B") << (process.isPromoted? "*" : "") << "] ";
             }
             ss << "\n";
         }
@@ -203,7 +161,7 @@ ss << "] ";
     wq.processList.push_back(p);
 }
 
-// 대기 큐를 다음 큐로 처리
+// 대기 큐 처리
 void processWaitQueue()
 {
     lock_guard < mutex > lock (wq.mtx) ;
@@ -226,20 +184,18 @@ void processWaitQueue()
 void moveToWaitQueue()
 {
     lock_guard < mutex > lock (mtx) ;
-    if (bottom && !bottom->processList.empty())
+    if (!bottom || bottom->processList.empty()) return;
+    auto it = bottom->processList.begin();
+    while (it != bottom->processList.end())
     {
-        auto it = bottom->processList.begin();
-        while (it != bottom->processList.end())
+        if (!it->isForeground && it->remainingTime > 0)
         {
-            if (!it->isForeground && it->remainingTime > 0)
-            {
-                addToWaitQueue(*it);
-                it = bottom->processList.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
+            addToWaitQueue(*it);
+            it = bottom->processList.erase(it);
+        }
+        else
+        {
+            ++it;
         }
     }
 }
@@ -256,8 +212,7 @@ void simulateProcesses(DynamicQueue& queue)
         int pid = rand() % 100; // 랜덤 프로세스 ID 생성
         bool isForeground = rand() % 2 == 0; // 프로세스가 foreground 또는 background인지 랜덤으로 결정
         Process p(pid, isForeground);
-        if (!isForeground)
-            p.remainingTime = rand() % 10 + 1; // 백그라운드 프로세스의 잔여 시간 랜덤 생성
+        if (!isForeground) p.remainingTime = rand() % 10 + 1; // 백그라운드 프로세스의 잔여 시간 랜덤 생성
 
         // 프로세스 enqueue
         queue.enqueue(p);
